@@ -1,0 +1,15 @@
+[profile.default]
+src = "contracts/src"
+out = "contracts/out"
+libs = ["contracts/lib"]
+test = "contracts/test"
+cache_path = "contracts/cache"
+solc_version = "0.8.27"
+# BITE V2 (Sandbox 2) requires EVM istanbul — per skalenetwork/bite-solidity
+# README and the bite skill (~/.claude/skills/bite).
+evm_version = "istanbul"
+optimizer = true
+optimizer_runs = 200
+# Dependencies are managed via `forge install` (git submodules under
+# contracts/lib/); no [dependencies] block — that's for Soldeer, which we
+# aren't using.

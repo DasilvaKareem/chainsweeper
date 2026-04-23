@@ -12,6 +12,22 @@ dist
 dist-ssr
 *.local
 
+# Claude Code local config
+.claude/
+
+# Cloudflare Wrangler
+.wrangler/
+
+# Foundry
+contracts/out
+contracts/cache
+contracts/broadcast
+
+# secrets
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

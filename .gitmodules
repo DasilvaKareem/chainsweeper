@@ -1,0 +1,6 @@
+[submodule "contracts/lib/bite-solidity"]
+	path = contracts/lib/bite-solidity
+	url = https://github.com/skalenetwork/bite-solidity
+[submodule "contracts/lib/openzeppelin-contracts"]
+	path = contracts/lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts

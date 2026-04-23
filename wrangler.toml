@@ -1,0 +1,38 @@
+name = "chainsweeper-room"
+main = "worker/src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Room DO: one instance per PvP matchId (6-char code) — dedicated single-
+# writer actor for turn/player/board state.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# TerritoryIndex DO: singleton (name = 'global') that polls the SKALE chain
+# for plot + marketplace events and fans snapshots/deltas out over WS. Shard
+# by chunk coord when plot count outgrows one instance.
+[[durable_objects.bindings]]
+name = "TERRITORY"
+class_name = "TerritoryIndex"
+
+[[migrations]]
+tag = "v1"
+# SQLite-backed DO storage — required by Cloudflare's free plan. Legacy KV-
+# backed storage is deprecated.
+new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["TerritoryIndex"]
+
+# ---- Territories chain env vars -------------------------------------------
+# SKALE BITE V2 Sandbox 2 (chain id 1036987955). RPC URL is gated (Discord
+# request) — set via `wrangler secret put SKALE_RPC_URL` once provisioned.
+# Contract addresses are empty placeholders until deployed.
+[vars]
+SKALE_RPC_URL = ""
+PLOTS_ADDRESS = ""
+MARKETPLACE_ADDRESS = ""
+
+[observability]
+enabled = true

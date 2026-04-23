@@ -1,0 +1,2 @@
+@skalenetwork/bite-solidity/=contracts/lib/bite-solidity/contracts/
+@openzeppelin/contracts/=contracts/lib/openzeppelin-contracts/contracts/

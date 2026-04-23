@@ -6,10 +6,21 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:audio": "node --env-file-if-exists=.env scripts/generate-audio.ts",
+    "worker:dev": "wrangler dev --port 8787 --local",
+    "worker:deploy": "wrangler deploy",
+    "worker:typecheck": "tsc --noEmit -p worker/tsconfig.json"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260418.1",
     "typescript": "~6.0.2",
-    "vite": "^8.0.4"
+    "vite": "^8.0.4",
+    "wrangler": "^4.83.0"
+  },
+  "dependencies": {
+    "@skalenetwork/bite": "^0.8.1",
+    "ethers": "^6.16.0",
+    "phaser": "^4.0.0"
   }
 }
