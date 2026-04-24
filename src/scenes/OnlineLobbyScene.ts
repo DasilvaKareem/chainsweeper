@@ -3,7 +3,7 @@ import { addText } from '../ui/text';
 import { audio } from '../audio/manager';
 import { createRoom, joinRoom, isValidRoomCode, type RoomClient } from '../net/room';
 import { DEFAULT_RULES, type MatchConfig } from '../state/gameState';
-import { ChainClient, deriveMatchId, encryptBoard, BITE_SANDBOX_2, CONTRACTS } from '../chain';
+import { ChainClient, deriveMatchId, encryptBoard, SKALE_CHAIN, CONTRACTS, friendlyTxError } from '../chain';
 
 type Mode = 'menu' | 'create' | 'join' | 'connecting' | 'host-ready' | 'guest-waiting';
 
@@ -118,7 +118,8 @@ export class OnlineLobbyScene extends Phaser.Scene {
         this.attachRoomEvents();
         this.renderMode('create');
       } catch (err) {
-        this.showError((err as Error).message ?? 'Failed to create match');
+        console.error('[online] createRoom failed', err);
+        this.showError(`Failed to create match — ${friendlyTxError(err)}`);
       }
     });
     this.makeButton(cx, height * 0.48 + 72, 'Join Match', 0x2a6df4, 260, () => {
@@ -188,7 +189,8 @@ export class OnlineLobbyScene extends Phaser.Scene {
           await this.chainClient.joinMatch(parsed.chain.matchId);
           chainCtx = { client: this.chainClient, matchId: parsed.chain.matchId };
         } catch (err) {
-          this.showError((err as Error).message ?? 'Failed to join on-chain match');
+          console.error('[online] joinMatch failed', err);
+          this.showError(`Failed to join on-chain match — ${friendlyTxError(err)}`);
           return;
         }
       }
@@ -284,7 +286,8 @@ export class OnlineLobbyScene extends Phaser.Scene {
         // client receives room-state listing both players — the connect
         // promise auto-fires match-start on that case.
       } catch (err) {
-        this.showError((err as Error).message ?? 'Failed to join match');
+        console.error('[online] joinRoom failed', err);
+        this.showError(`Failed to join match — ${friendlyTxError(err)}`);
       }
     });
 
@@ -418,14 +421,15 @@ export class OnlineLobbyScene extends Phaser.Scene {
         this.flashToast(width / 2, scH * 0.80, 'Encrypting board…', '#6eb4ff');
         const salt = crypto.randomUUID();
         const matchId = deriveMatchId(this.room!.code, salt);
-        const { cipherCells } = await encryptBoard(BITE_SANDBOX_2.rpcUrl, CONTRACTS.match, config);
+        const { cipherCells } = await encryptBoard(SKALE_CHAIN.rpcUrl, CONTRACTS.match, config);
         this.flashToast(width / 2, scH * 0.80, 'Posting match to chain…', '#6eb4ff');
         await this.chainClient.createMatch(matchId, config.width, config.height, config.coreCount, cipherCells);
 
         const publicConfig = { ...config, seed: 0, chain: { matchId } };
         this.room?.sendMatchConfig(publicConfig);
       } catch (err) {
-        this.flashToast(width / 2, scH * 0.80, (err as Error).message ?? 'Chain setup failed', '#ff7a7a');
+        console.error('[online] chain setup failed', err);
+        this.flashToast(width / 2, scH * 0.80, `Chain setup — ${friendlyTxError(err)}`, '#ff7a7a');
       }
     });
   }

@@ -33,7 +33,7 @@ export function deriveMatchId(roomCode: string, salt: string): string {
  * in `config` MUST stay secret to the host; the reducer is deterministic,
  * so sharing the seed defeats the privacy.
  *
- * @param rpcUrl         SKALE BITE V2 Sandbox 2 RPC URL.
+ * @param rpcUrl         SKALE Base Sepolia RPC URL.
  * @param submitterAddr  Address of the deployed MachineSweepMatch contract.
  *                       BITE binds ciphertexts to the submitter via aadTE,
  *                       so this must match what's on-chain or decryption

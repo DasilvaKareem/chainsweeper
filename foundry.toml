@@ -5,8 +5,10 @@ libs = ["contracts/lib"]
 test = "contracts/test"
 cache_path = "contracts/cache"
 solc_version = "0.8.27"
-# BITE V2 (Sandbox 2) requires EVM istanbul — per skalenetwork/bite-solidity
-# README and the bite skill (~/.claude/skills/bite).
+# BITE V2 requires EVM istanbul — per skalenetwork/bite-solidity README and
+# the bite skill (~/.claude/skills/bite). SKALE Base Sepolia inherits the
+# same BITE V2 constraint; bump this only after confirming Cancun is safe on
+# the target chain.
 evm_version = "istanbul"
 optimizer = true
 optimizer_runs = 200

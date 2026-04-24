@@ -58,6 +58,11 @@ export class ArcadeRunScene extends Phaser.Scene {
   }
 
   create(data: ArcadeEntry = {}) {
+    console.log('[trace] ArcadeRun.create', {
+      data,
+      currentLevelIndex: arcadeRun.levelIndex,
+      isComplete: arcadeRun.isComplete(),
+    });
     if (data.restart) arcadeRun.reset();
 
     // Endgame chain — plays after the top floor is cleared: ENDGAME → FINAL → Menu.
@@ -318,6 +323,7 @@ export class ArcadeRunScene extends Phaser.Scene {
   }
 
   private handleResult(levelId: number, result: { scores: number[]; winner: number | null }) {
+    console.log('[trace] ArcadeRun.handleResult', { levelId, result });
     const level = ARCADE_LEVELS.find((l) => l.id === levelId);
     if (!level) { this.scene.start('Menu'); return; }
 
@@ -325,6 +331,10 @@ export class ArcadeRunScene extends Phaser.Scene {
     // alive/top scorer — a genuine win, solo OR vs-AI. `solo ? true` would
     // wrongly count an eliminated solo player as a win and advance the run.
     const won = result.winner === 0;
+    console.log('[trace] ArcadeRun.handleResult decision', {
+      won,
+      nextLevelIndex: won ? arcadeRun.levelIndex + 1 : arcadeRun.levelIndex,
+    });
 
     if (won) {
       arcadeRun.advance();
@@ -404,8 +414,14 @@ export class ArcadeRunScene extends Phaser.Scene {
       continueLabel: lastLevel ? 'Finish' : 'Next Floor',
       onContinue: () => {
         this.scene.stop('Dialogue');
-        if (lastLevel) this.scene.start('ArcadeRun', { endgameStep: 'endgame' });
-        else this.scene.start('ArcadeRun');
+        // IMPORTANT: pass an explicit data object. Phaser's scene.start with
+        // no second arg preserves the scene's stale `settings.data` — here
+        // that's the {result, finishedLevelId} payload from MatchScene.
+        // Re-entering ArcadeRun with that stale payload re-runs handleResult
+        // → advance() → another Dialogue, auto-advancing every floor to the
+        // endgame cutscene.
+        const next: ArcadeEntry = lastLevel ? { endgameStep: 'endgame' } : {};
+        this.scene.start('ArcadeRun', next);
       },
     });
   }

@@ -1,0 +1,38 @@
+name: ChainSweeper
+options:
+  bundleIdPrefix: com.chainsweeper
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  ChainSweeper:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+        excludes:
+          - "Info.plist"
+          - "web"
+      - path: Resources/web
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chainsweeper.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES

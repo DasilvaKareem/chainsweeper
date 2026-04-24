@@ -6,11 +6,14 @@ export { Room, TerritoryIndex };
 export interface Env {
   ROOM: DurableObjectNamespace;
   TERRITORY: DurableObjectNamespace;
-  // SKALE BITE V2 sandbox 2 RPC URL + deployed contract addresses. Required
-  // for the TerritoryIndex DO's chain polling.
+  // SKALE Base Sepolia RPC URL + deployed contract addresses. Required for
+  // the TerritoryIndex DO's chain polling.
   SKALE_RPC_URL: string;
   PLOTS_ADDRESS: string;
   MARKETPLACE_ADDRESS: string;
+  // Block where the Plots contract was deployed. DO scans start here instead
+  // of block 0 to keep cold starts within the Worker CPU budget.
+  FROM_BLOCK: string;
 }
 
 // Path-based routing:

@@ -8,6 +8,8 @@ import {
   type PlotListing,
   PlotStatus,
   type ChainPlot,
+  errMsg,
+  friendlyTxError,
 } from '../chain';
 
 interface PlotMarketSceneData {
@@ -94,7 +96,8 @@ export class PlotMarketScene extends Phaser.Scene {
       this.renderRows(rows);
       this.statusText?.setText(`${rows.length} plots · ${rows.filter((r) => r.listing.active).length} listed`);
     } catch (err) {
-      this.statusText?.setText(`Load failed: ${errMsg(err)}`);
+      console.error('[market] load failed', err);
+      this.statusText?.setText(`Load failed — ${errMsg(err)}`);
     }
   }
 
@@ -175,7 +178,8 @@ export class PlotMarketScene extends Phaser.Scene {
       this.statusText?.setText('Bought. Refreshing…');
       await this.refresh();
     } catch (err) {
-      this.statusText?.setText(`Buy failed: ${errMsg(err)}`);
+      console.error('[market] buyRepair failed', err);
+      this.statusText?.setText(`Buy failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -190,7 +194,8 @@ export class PlotMarketScene extends Phaser.Scene {
       await this.client.approveMarketplace();
       this.statusText?.setText('Approved. You can list now.');
     } catch (err) {
-      this.statusText?.setText(`Approve failed: ${errMsg(err)}`);
+      console.error('[market] approve failed', err);
+      this.statusText?.setText(`Approve failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -209,7 +214,8 @@ export class PlotMarketScene extends Phaser.Scene {
       this.statusText?.setText('Listed.');
       await this.refresh();
     } catch (err) {
-      this.statusText?.setText(`List failed: ${errMsg(err)}`);
+      console.error('[market] list failed', err);
+      this.statusText?.setText(`List failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -220,7 +226,8 @@ export class PlotMarketScene extends Phaser.Scene {
       this.statusText?.setText('Cancelled.');
       await this.refresh();
     } catch (err) {
-      this.statusText?.setText(`Cancel failed: ${errMsg(err)}`);
+      console.error('[market] cancel failed', err);
+      this.statusText?.setText(`Cancel failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -231,7 +238,8 @@ export class PlotMarketScene extends Phaser.Scene {
       this.statusText?.setText('Bought.');
       await this.refresh();
     } catch (err) {
-      this.statusText?.setText(`Buy failed: ${errMsg(err)}`);
+      console.error('[market] buy failed', err);
+      this.statusText?.setText(`Buy failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -266,6 +274,3 @@ function short(addr: string): string {
   return addr.slice(0, 6) + '…' + addr.slice(-4);
 }
 
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

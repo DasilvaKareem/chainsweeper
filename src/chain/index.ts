@@ -13,12 +13,13 @@ export {
 } from './plotBoard';
 export {
   SKALE_CHAIN,
-  BITE_SANDBOX_2,
+  SKALE_BASE_SEPOLIA,
   CONTRACTS,
   CTX_GAS_PAYMENT_WEI,
   PLOT_PRICE_WEI_DEFAULT,
   REPAIR_PRICE_WEI_DEFAULT,
 } from './config';
+export { errMsg, friendlyTxError } from './errors';
 export {
   MatchStatus,
   CellState,

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@skalenetwork/bite": "^0.8.1",
+    "buffer": "^6.0.3",
     "ethers": "^6.16.0",
     "phaser": "^4.0.0"
   }

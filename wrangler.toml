@@ -26,13 +26,17 @@ tag = "v2"
 new_sqlite_classes = ["TerritoryIndex"]
 
 # ---- Territories chain env vars -------------------------------------------
-# SKALE BITE V2 Sandbox 2 (chain id 1036987955). RPC URL is gated (Discord
-# request) — set via `wrangler secret put SKALE_RPC_URL` once provisioned.
-# Contract addresses are empty placeholders until deployed.
+# SKALE Base Sepolia (chain id 324705682). Public RPC — no gating. Override
+# per-environment with `wrangler secret put SKALE_RPC_URL` if you run your
+# own node. Contract addresses are empty placeholders until deployed.
 [vars]
-SKALE_RPC_URL = ""
-PLOTS_ADDRESS = ""
-MARKETPLACE_ADDRESS = ""
+SKALE_RPC_URL = "https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha"
+# Deployed on SKALE Base Sepolia 2026-04-22.
+PLOTS_ADDRESS = "0x675Fcd07f1a9441d96A7aE033CE23313eb363739"
+MARKETPLACE_ADDRESS = "0x4Ea9181a151978e2c2aE8B6909aBb14d10228245"
+# Deploy block of the Plots contract — DO starts log-scans here instead of
+# block 0. (0x18da62 = 1628770.) Bump this if the contracts are redeployed.
+FROM_BLOCK = "1628770"
 
 [observability]
 enabled = true

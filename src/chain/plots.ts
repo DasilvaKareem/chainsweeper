@@ -7,12 +7,13 @@ import {
 } from 'ethers';
 import { MARKETPLACE_ABI, PLOTS_ABI, REPAIRS_ABI } from './abi';
 import {
-  BITE_SANDBOX_2,
+  SKALE_CHAIN,
   CONTRACTS,
   CTX_GAS_PAYMENT_WEI,
   PLOT_PRICE_WEI_DEFAULT,
   REPAIR_PRICE_WEI_DEFAULT,
 } from './config';
+import { switchOrAddChain } from './wallet';
 import {
   type CellRevealedEvent,
   type ChainPlot,
@@ -33,6 +34,7 @@ export class PlotClient {
   readonly plotsC: Contract;
   readonly repairsC: Contract;
   readonly marketC: Contract;
+  readonly provider: BrowserProvider;
   readonly address: string;
   plotPriceWei: bigint;
   repairPriceWei: bigint;
@@ -41,6 +43,7 @@ export class PlotClient {
     plotsC: Contract,
     repairsC: Contract,
     marketC: Contract,
+    provider: BrowserProvider,
     address: string,
     plotPriceWei: bigint,
     repairPriceWei: bigint,
@@ -48,9 +51,15 @@ export class PlotClient {
     this.plotsC = plotsC;
     this.repairsC = repairsC;
     this.marketC = marketC;
+    this.provider = provider;
     this.address = address;
     this.plotPriceWei = plotPriceWei;
     this.repairPriceWei = repairPriceWei;
+  }
+
+  /** Native CREDIT balance, in wei (SKALE Base native has 18 decimals like ETH). */
+  async nativeBalance(): Promise<bigint> {
+    return await this.provider.getBalance(this.address);
   }
 
   static async connect(): Promise<PlotClient> {
@@ -61,10 +70,8 @@ export class PlotClient {
     await provider.send('eth_requestAccounts', []);
 
     const network = await provider.getNetwork();
-    if (Number(network.chainId) !== BITE_SANDBOX_2.chainId) {
-      throw new Error(
-        `Wallet is on chain ${network.chainId}; switch to BITE V2 Sandbox 2 (${BITE_SANDBOX_2.chainId})`,
-      );
+    if (Number(network.chainId) !== SKALE_CHAIN.chainId) {
+      await switchOrAddChain(eip1193);
     }
 
     const signer = await provider.getSigner();
@@ -84,7 +91,7 @@ export class PlotClient {
       repairPrice = BigInt(await repairsC.REPAIR_PRICE());
     } catch { /* keep default */ }
 
-    return new PlotClient(plotsC, repairsC, marketC, address, plotPrice, repairPrice);
+    return new PlotClient(plotsC, repairsC, marketC, provider, address, plotPrice, repairPrice);
   }
 
   // ----------------------------------------------------------------- mint

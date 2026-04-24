@@ -20,10 +20,12 @@ import {
   type TutorStep,
 } from '../state/tutorial';
 import { addText } from '../ui/text';
+import { haptic } from '../ui/haptic';
 import { audio, championBgm, type BgmId, type ChampionKey } from '../audio/manager';
 import type { RoomClient, NetMove } from '../net/room';
 import { playerState } from '../state/player';
 import type { ChainClient } from '../chain';
+import { friendlyTxError } from '../chain';
 
 const GAP = 2;
 // Base board margin top. Bumped per-match in `computeBoardMarginTop` so the
@@ -193,6 +195,12 @@ export class MatchScene extends Phaser.Scene {
   private elapsedText?: Phaser.GameObjects.Text;
   private skipButtonBg?: Phaser.GameObjects.Rectangle;
   private skipButtonLabel?: Phaser.GameObjects.Text;
+  // Touch-only mode: when on, a single tap quarantines instead of revealing.
+  // Toggle lives in the bottom-right of narrow layouts so the thumb can flip
+  // modes without needing to hold a tile down for the long-press threshold.
+  private quarantineMode = false;
+  private modeToggleBg?: Phaser.GameObjects.Rectangle;
+  private modeToggleLabel?: Phaser.GameObjects.Text;
   private createData?: MatchCreateData;
   private endBannerShown = false;
   // Timestamp at which the match mounted. Belt-and-suspenders: the end banner
@@ -340,6 +348,7 @@ export class MatchScene extends Phaser.Scene {
 
     this.buildChatterBox();
     this.applyNarrowLayout();
+    this.buildModeToggleButton();
     // Admin force-win would desync a networked match — disable online.
     if (!this.online) this.buildAdminButton();
     this.renderAll();
@@ -384,8 +393,7 @@ export class MatchScene extends Phaser.Scene {
   }
 
   private buildSkipButton() {
-    const x = this.scale.width - 24;
-    const y = this.scale.height - 28;
+    const { x, y } = this.skipButtonAnchor();
     this.skipButtonBg = this.add.rectangle(x, y, 160, 30, 0x1c2030)
       .setOrigin(1, 0.5)
       .setStrokeStyle(1, 0x475172)
@@ -397,6 +405,16 @@ export class MatchScene extends Phaser.Scene {
     this.skipButtonBg.on('pointerover', () => this.skipButtonBg?.setFillStyle(0x252b3f));
     this.skipButtonBg.on('pointerout', () => this.skipButtonBg?.setFillStyle(0x1c2030));
     this.skipButtonBg.on('pointerdown', () => this.skipTutorial());
+  }
+
+  // Narrow: anchor top-right under the timer so it's clear of the chatter
+  // block at the bottom. Wide: keep the familiar bottom-right corner — the
+  // chatter is short enough there that they don't collide.
+  private skipButtonAnchor(): { x: number; y: number } {
+    const w = this.scale.width;
+    const h = this.scale.height;
+    if (isNarrow(w)) return { x: w - 24, y: 52 };
+    return { x: w - 24, y: h - 28 };
   }
 
   // Dev/admin cheat — bottom-left button that force-wins the match for P0.
@@ -606,17 +624,22 @@ export class MatchScene extends Phaser.Scene {
     const portraitId = this.tutorScript ? 'init0' : this.champion?.id;
     const portraitKey = portraitId ? `portrait_${portraitId}` : null;
     const hasPortrait = !!(portraitKey && this.textures.exists(portraitKey));
-    const size = CHATTER_PORTRAIT_SIZE;
+    const narrow = isNarrow(this.scale.width);
+    // On narrow viewports portrait + text can't sit side-by-side without the
+    // text getting clipped, so we stack portrait above and shrink it.
+    const size = narrow ? 64 : CHATTER_PORTRAIT_SIZE;
+    const offset = narrow ? 180 : CHATTER_TEXT_OFFSET_FROM_BOTTOM;
     const x = 24;
-    const y = this.scale.height - CHATTER_TEXT_OFFSET_FROM_BOTTOM;
-    const textX = hasPortrait ? x + size + 14 : x;
+    const y = this.scale.height - offset;
+    const textX = narrow ? x : (hasPortrait ? x + size + 14 : x);
 
     if (hasPortrait && portraitKey && portraitId) {
       const color = CHARACTER_BORDER_COLORS[portraitId] ?? 0x6eb4ff;
       const boxX = x;
-      // Portrait bottom aligns with the chatter text block (name + line ≈ 36px
-      // tall); everything above that is the bust, visible and prominent.
-      const boxY = y - (size - 36);
+      // Narrow: portrait sits above the name, bottom 10px from name baseline.
+      // Wide: portrait bottom aligns with the chatter text block (name + line
+      // ≈ 36px tall) so the bust shows prominently beside the text.
+      const boxY = narrow ? y - size - 10 : y - (size - 36);
       const cx = boxX + size / 2;
       const DEPTH = 900;
       // Solid dark backing so the MC's gutter portrait (which overlaps this
@@ -658,10 +681,18 @@ export class MatchScene extends Phaser.Scene {
       color: '#6eb4ff',
       fontStyle: 'bold',
     }).setAlpha(0);
+    // Narrow: portrait is stacked above, so text gets the full width.
+    // Wide: text sits beside the portrait so we reserve the portrait band.
+    const wrapWidth = narrow
+      ? this.scale.width - 48
+      : Math.min(
+          560 - (hasPortrait ? size + 14 : 0),
+          this.scale.width - 60 - (hasPortrait ? size + 14 : 0),
+        );
     this.chatterLine = addText(this, textX, y + 18, '', {
       fontSize: '17px',
       color: '#e8ecf1',
-      wordWrap: { width: Math.min(560 - (hasPortrait ? size + 14 : 0), this.scale.width - 60 - (hasPortrait ? size + 14 : 0)) },
+      wordWrap: { width: wrapWidth },
     }).setAlpha(0);
   }
 
@@ -1300,6 +1331,7 @@ export class MatchScene extends Phaser.Scene {
     this.repositionTiles();
     this.repositionChatter();
     this.repositionSkipButton();
+    this.repositionModeToggle();
     this.rescaleBackdrop();
     this.repositionMatchPortraits();
     this.applyNarrowLayout();
@@ -1429,22 +1461,36 @@ export class MatchScene extends Phaser.Scene {
   private repositionChatter() {
     if (!this.chatterName || !this.chatterLine) return;
     const x = 24;
-    const y = this.scale.height - CHATTER_TEXT_OFFSET_FROM_BOTTOM;
+    const narrow = isNarrow(this.scale.width);
+    const size = narrow ? 64 : CHATTER_PORTRAIT_SIZE;
+    const offset = narrow ? 180 : CHATTER_TEXT_OFFSET_FROM_BOTTOM;
+    const y = this.scale.height - offset;
     const hasPortrait = !!this.chatterPortrait;
-    const size = CHATTER_PORTRAIT_SIZE;
-    const textX = hasPortrait ? x + size + 14 : x;
+    const textX = narrow ? x : (hasPortrait ? x + size + 14 : x);
     this.chatterName.setPosition(textX, y);
     this.chatterLine.setPosition(textX, y + 18);
     const wrapPad = hasPortrait ? size + 14 : 0;
     this.chatterLine.setStyle({
-      wordWrap: { width: Math.min(560 - wrapPad, this.scale.width - 60 - wrapPad) },
+      wordWrap: {
+        width: narrow
+          ? this.scale.width - 48
+          : Math.min(560 - wrapPad, this.scale.width - 60 - wrapPad),
+      },
     });
     if (hasPortrait) {
       const boxX = x;
-      const boxY = y - (size - 36);
+      const boxY = narrow ? y - size - 10 : y - (size - 36);
       const cx = boxX + size / 2;
-      this.chatterPortraitBg?.setPosition(cx, boxY + size / 2);
-      this.chatterPortrait?.setPosition(cx, boxY);
+      // Resize bg + portrait in case we crossed the narrow/wide boundary
+      // (rotation, window resize) — otherwise they'd stay at their original
+      // dimensions and mismatch the border's redraw.
+      this.chatterPortraitBg?.setPosition(cx, boxY + size / 2).setSize(size, size);
+      if (this.chatterPortrait) {
+        this.chatterPortrait.setPosition(cx, boxY);
+        const tex = this.chatterPortrait.texture.getSourceImage() as HTMLImageElement;
+        const cropSide = Math.min(tex.width, Math.round(tex.height * 0.5));
+        this.chatterPortrait.setScale(size / cropSide);
+      }
       if (this.chatterPortraitBorder) {
         const portraitId = this.tutorScript ? 'init0' : this.champion?.id;
         const color = (portraitId && CHARACTER_BORDER_COLORS[portraitId]) ?? 0x6eb4ff;
@@ -1460,10 +1506,73 @@ export class MatchScene extends Phaser.Scene {
 
   private repositionSkipButton() {
     if (!this.skipButtonBg || !this.skipButtonLabel) return;
-    const x = this.scale.width - 24;
-    const y = this.scale.height - 28;
+    const { x, y } = this.skipButtonAnchor();
     this.skipButtonBg.setPosition(x, y);
     this.skipButtonLabel.setPosition(x - 80, y);
+  }
+
+  // FLAG-mode toggle. Only built on narrow layouts — desktop has right-click
+  // so an on-screen toggle would just be visual noise there.
+  private buildModeToggleButton() {
+    if (!isNarrow(this.scale.width)) return;
+    const { x, y } = this.modeToggleAnchor();
+    this.modeToggleBg = this.add.rectangle(x, y, 96, 48, 0x1c2030)
+      .setOrigin(0.5)
+      .setStrokeStyle(2, 0x475172)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(600);
+    this.modeToggleLabel = addText(this, x, y, '⚑ FLAG', {
+      fontSize: '14px',
+      color: '#c8cfdc',
+      fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(601);
+    this.modeToggleBg.on('pointerdown', () => {
+      this.setQuarantineMode(!this.quarantineMode);
+    });
+    this.updateModeToggleVisuals();
+  }
+
+  // Anchor: floats above the chatter block, right edge of the screen. 220px
+  // above the bottom keeps it clear of the chatter portrait on narrow.
+  private modeToggleAnchor(): { x: number; y: number } {
+    const w = this.scale.width;
+    const h = this.scale.height;
+    return { x: w - 58, y: h - 220 };
+  }
+
+  private repositionModeToggle() {
+    const narrow = isNarrow(this.scale.width);
+    if (!narrow) {
+      this.modeToggleBg?.setVisible(false);
+      this.modeToggleLabel?.setVisible(false);
+      return;
+    }
+    if (!this.modeToggleBg) {
+      this.buildModeToggleButton();
+      return;
+    }
+    this.modeToggleBg.setVisible(true);
+    this.modeToggleLabel?.setVisible(true);
+    const { x, y } = this.modeToggleAnchor();
+    this.modeToggleBg.setPosition(x, y);
+    this.modeToggleLabel?.setPosition(x, y);
+  }
+
+  private setQuarantineMode(on: boolean) {
+    this.quarantineMode = on;
+    haptic('selection');
+    this.updateModeToggleVisuals();
+  }
+
+  private updateModeToggleVisuals() {
+    if (!this.modeToggleBg || !this.modeToggleLabel) return;
+    if (this.quarantineMode) {
+      this.modeToggleBg.setFillStyle(0x7a2e2e).setStrokeStyle(2, 0xef5a3a);
+      this.modeToggleLabel.setText('⚑ ON').setColor('#ffe1d6');
+    } else {
+      this.modeToggleBg.setFillStyle(0x1c2030).setStrokeStyle(2, 0x475172);
+      this.modeToggleLabel.setText('⚑ FLAG').setColor('#c8cfdc');
+    }
   }
 
   private buildBoard() {
@@ -1499,8 +1608,20 @@ export class MatchScene extends Phaser.Scene {
             this.handleMark(x, y);
             return;
           }
-          // Touch: wait for pointerup — tap reveals, long-press quarantines.
-          const isTouch = (ev as PointerEvent | undefined)?.pointerType === 'touch';
+          // FLAG mode — any primary click/tap flags immediately. Checked BEFORE
+          // the touch-vs-mouse branch so it works in the simulator (mouse) and
+          // on physical touch devices equally.
+          if (this.quarantineMode) {
+            haptic('warning');
+            this.handleMark(x, y);
+            return;
+          }
+          // Touch detection — pointer.wasTouch is Phaser's normalized signal;
+          // PointerEvent.pointerType is the native fallback. Either way, touch
+          // goes into the tap/long-press path.
+          const pWasTouch = (pointer as { wasTouch?: boolean }).wasTouch === true;
+          const ptype = (ev as PointerEvent | undefined)?.pointerType;
+          const isTouch = pWasTouch || ptype === 'touch' || ptype === 'pen';
           if (!isTouch) {
             this.handleReveal(x, y);
             return;
@@ -1509,6 +1630,10 @@ export class MatchScene extends Phaser.Scene {
           const longPress = this.time.delayedCall(LONG_PRESS_MS, () => {
             if (resolved) return;
             resolved = true;
+            // Threshold crossed — user held long enough for a flag. Buzz so
+            // they feel the transition from "tap" to "hold" without having to
+            // wait for the visual result.
+            haptic('warning');
             this.handleMark(x, y);
           });
           const onUp = () => {
@@ -1549,8 +1674,9 @@ export class MatchScene extends Phaser.Scene {
       this.flashToast('Submitting reveal…');
       const { client, matchId } = this.online.chain;
       client.reveal(matchId, x, y).catch((err) => {
+        console.error('[match] chain reveal failed', err);
         this.pendingMove = false;
-        this.flashToast(`Chain reveal failed: ${(err as Error).message}`);
+        this.flashToast(`Reveal — ${friendlyTxError(err)}`);
       });
       return;
     }
@@ -1961,6 +2087,12 @@ export class MatchScene extends Phaser.Scene {
   }
 
   private showEndBanner() {
+    console.log('[trace] MatchScene.showEndBanner', {
+      status: this.state.status,
+      winner: this.state.winner,
+      tutor: !!this.tutorScript,
+      floor: this.floorLabel,
+    });
     if (this.endBannerShown) return;
     // Defensive: never show the end banner unless the reducer actually put the
     // match into 'ended'. A stray delayedCall or race condition must not pop
@@ -2095,6 +2227,14 @@ export class MatchScene extends Phaser.Scene {
     // Only advance out of the match if the match actually ended. Blocks stray
     // keyboard events (held Enter from a previous scene) from short-circuiting
     // a live game and handing a phantom "win" to the arcade flow.
+    console.log('[trace] MatchScene.finalizeMatch', {
+      status: this.state.status,
+      winner: this.state.winner,
+      scores: this.state.scores,
+      endBannerShown: this.endBannerShown,
+      tutor: !!this.tutorScript,
+      floor: this.floorLabel,
+    });
     if (this.state.status !== 'ended') return;
     if (!this.endBannerShown) return;
     // Online matches don't have an arcade-flow onComplete; go straight to the

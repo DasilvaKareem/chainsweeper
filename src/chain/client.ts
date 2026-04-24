@@ -6,7 +6,8 @@ import {
   type Log,
 } from 'ethers';
 import { MATCH_ABI, RATINGS_ABI } from './abi';
-import { BITE_SANDBOX_2, CONTRACTS, CTX_GAS_PAYMENT_WEI } from './config';
+import { SKALE_CHAIN, CONTRACTS, CTX_GAS_PAYMENT_WEI } from './config';
+import { switchOrAddChain } from './wallet';
 import {
   type ChainCell,
   type ChainMatch,
@@ -35,7 +36,7 @@ export class ChainClient {
 
   /**
    * Prompt the injected wallet (MetaMask etc.) to connect and ensure we're on
-   * BITE V2 Sandbox 2. Throws if no wallet is installed or the user rejects.
+   * SKALE Base Sepolia. Throws if no wallet is installed or the user rejects.
    */
   static async connect(): Promise<ChainClient> {
     const eip1193 = (globalThis as unknown as { ethereum?: Eip1193Provider }).ethereum;
@@ -45,7 +46,7 @@ export class ChainClient {
     await provider.send('eth_requestAccounts', []);
 
     const network = await provider.getNetwork();
-    if (Number(network.chainId) !== BITE_SANDBOX_2.chainId) {
+    if (Number(network.chainId) !== SKALE_CHAIN.chainId) {
       await switchOrAddChain(eip1193);
     }
 
@@ -194,39 +195,5 @@ export class ChainClient {
         adjacency: Number(adjacency),
       };
     });
-  }
-}
-
-// ---------------------------------------------------------- wallet helpers
-
-/**
- * EIP-3085 wallet_addEthereumChain / wallet_switchEthereumChain flow for
- * BITE V2 Sandbox 2. Tries to switch first; if the chain isn't in the
- * wallet yet, requests to add it and then switches.
- */
-async function switchOrAddChain(eip1193: Eip1193Provider): Promise<void> {
-  const hexChainId = '0x' + BITE_SANDBOX_2.chainId.toString(16);
-  try {
-    await eip1193.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: hexChainId }],
-    });
-  } catch (err) {
-    // Error code 4902 = "chain not added". Add it, then the switch is implicit.
-    const code = (err as { code?: number }).code;
-    if (code === 4902 || code === -32603) {
-      await eip1193.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: hexChainId,
-          chainName: BITE_SANDBOX_2.name,
-          nativeCurrency: { name: BITE_SANDBOX_2.nativeSymbol, symbol: BITE_SANDBOX_2.nativeSymbol, decimals: 18 },
-          rpcUrls: BITE_SANDBOX_2.rpcUrl ? [BITE_SANDBOX_2.rpcUrl] : [],
-          blockExplorerUrls: BITE_SANDBOX_2.explorerUrl ? [BITE_SANDBOX_2.explorerUrl] : [],
-        }],
-      });
-    } else {
-      throw err;
-    }
   }
 }

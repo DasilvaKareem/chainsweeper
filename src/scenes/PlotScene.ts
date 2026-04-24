@@ -10,9 +10,11 @@ import {
   PLOT_WIDTH,
   PLOT_HEIGHT,
   encryptPlot,
-  BITE_SANDBOX_2,
+  SKALE_CHAIN,
   CONTRACTS,
   computeNeighborLeak,
+  errMsg,
+  friendlyTxError,
 } from '../chain';
 
 interface PlotSceneData {
@@ -162,7 +164,8 @@ export class PlotScene extends Phaser.Scene {
         }
       }
     } catch (err) {
-      this.statusText?.setText(`Hydrate failed: ${errMsg(err)}`);
+      console.error('[plot] hydrate failed', err);
+      this.statusText?.setText(`Hydrate failed — ${errMsg(err)}`);
     }
   }
 
@@ -311,9 +314,10 @@ export class PlotScene extends Phaser.Scene {
       await this.client.revealCell(this.tokenId, x, y);
       this.statusText?.setText(`Waiting on BITE decrypt for (${x},${y})…`);
     } catch (err) {
+      console.error('[plot] reveal failed', err);
       this.pending.delete(idx);
       rect?.setFillStyle(0x1e242f);
-      this.statusText?.setText(`Reveal failed: ${errMsg(err)}`);
+      this.statusText?.setText(`Reveal failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -335,7 +339,7 @@ export class PlotScene extends Phaser.Scene {
       if (!confirmed) return;
       this.statusText?.setText('Encrypting new layout…');
       const salt = Math.floor(Math.random() * 2 ** 30);
-      const plot = await encryptPlot(BITE_SANDBOX_2.rpcUrl, CONTRACTS.plots, this.plotX, this.plotY, salt);
+      const plot = await encryptPlot(SKALE_CHAIN.rpcUrl, CONTRACTS.plots, this.plotX, this.plotY, salt);
       this.statusText?.setText('Submitting repair tx…');
       await this.client.repairPlot(this.tokenId, plot.cipherCells);
       this.statusText?.setText('Repaired. Reloading…');
@@ -347,7 +351,8 @@ export class PlotScene extends Phaser.Scene {
         owner: this.owner,
       });
     } catch (err) {
-      this.statusText?.setText(`Repair failed: ${errMsg(err)}`);
+      console.error('[plot] repair failed', err);
+      this.statusText?.setText(`Repair failed — ${friendlyTxError(err)}`);
     }
   }
 
@@ -372,9 +377,6 @@ function short(addr: string): string {
   return addr.slice(0, 6) + '…' + addr.slice(-4);
 }
 
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 function adjacencyColor(n: number): string {
   // Classic minesweeper palette, tuned to the dark theme.

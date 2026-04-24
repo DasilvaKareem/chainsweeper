@@ -99,6 +99,34 @@ type MutableSound = Phaser.Sound.BaseSound & { volume: number };
 // and ramp volumes across the overlap — the mix masks the silence.
 const BGM_CROSSFADE_MS = 900;
 
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
+
+// localStorage is unavailable in some WebView contexts (private mode, etc.) —
+// wrap both read and write so the app still runs if storage throws.
+function loadGain(key: string, fallback: number): number {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    if (raw === null || raw === undefined) return fallback;
+    const n = Number.parseFloat(raw);
+    return Number.isFinite(n) ? clamp01(n) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function persistGain(key: string, value: number): void {
+  try {
+    window.localStorage?.setItem(key, String(value));
+  } catch {
+    // ignore
+  }
+}
+
 class AudioManager {
   private game: Phaser.Game | null = null;
   private currentBgm: MutableSound | null = null;
@@ -110,10 +138,56 @@ class AudioManager {
   private preCriticalKey: BgmId | null = null;
   private dangerLoop: MutableSound | null = null;
 
-  // Master mix. BGM sits under SFX by a healthy margin so dialogue/SFX cut
-  // through without me duck-mixing per event.
-  readonly bgmVolume = 0.4;
-  readonly sfxVolume = 0.7;
+  // Engine-baseline mix. BGM sits under SFX by a healthy margin so dialogue/SFX
+  // cut through without me duck-mixing per event.
+  private readonly bgmBase = 0.4;
+  private readonly sfxBase = 0.7;
+
+  // User-adjustable gain multipliers from the Settings scene. Persisted to
+  // localStorage so preferences survive reloads. Multiply into the base mix
+  // (bgmBase * bgmGain * masterGain for music, etc.) so "default" (1.0) keeps
+  // the old behavior and users can trim independently.
+  private masterGain = loadGain('cs:vol:master', 1);
+  private bgmGain = loadGain('cs:vol:bgm', 1);
+  private sfxGain = loadGain('cs:vol:sfx', 1);
+
+  // Effective volume multipliers used by the playback paths. Kept as methods
+  // rather than getters so tests can mock them cleanly.
+  private get bgmVolume(): number { return this.bgmBase * this.bgmGain * this.masterGain; }
+  private get sfxVolume(): number { return this.sfxBase * this.sfxGain * this.masterGain; }
+
+  getMasterGain(): number { return this.masterGain; }
+  getBgmGain(): number { return this.bgmGain; }
+  getSfxGain(): number { return this.sfxGain; }
+
+  setMasterGain(v: number): void {
+    this.masterGain = clamp01(v);
+    persistGain('cs:vol:master', this.masterGain);
+    this.applyRunningVolumes();
+  }
+  setBgmGain(v: number): void {
+    this.bgmGain = clamp01(v);
+    persistGain('cs:vol:bgm', this.bgmGain);
+    this.applyRunningVolumes();
+  }
+  setSfxGain(v: number): void {
+    this.sfxGain = clamp01(v);
+    persistGain('cs:vol:sfx', this.sfxGain);
+    this.applyRunningVolumes();
+  }
+
+  // Push the current effective volumes onto any sounds currently playing. SFX
+  // one-shots are already gone by the time you slide, but BGM and the danger
+  // loop are long-lived and need to reflect the new mix immediately.
+  private applyRunningVolumes(): void {
+    if (this.currentBgm) {
+      (this.currentBgm as unknown as { volume: number }).volume = this.bgmVolume;
+    }
+    if (this.dangerLoop) {
+      const base = SFX_BASE_VOLUME.danger ?? 0.35;
+      (this.dangerLoop as unknown as { volume: number }).volume = base * this.sfxVolume;
+    }
+  }
 
   init(game: Phaser.Game): void {
     this.game = game;

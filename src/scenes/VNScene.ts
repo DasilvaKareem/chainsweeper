@@ -75,6 +75,11 @@ export class VNScene extends Phaser.Scene {
     this.continueLabel = data.continueLabel ?? 'Continue';
 
     const { width, height } = this.scale;
+    // Narrow viewports (phones) flip the layout from side-by-side
+    // (portraits flank the text) to stacked (portraits above a wide text
+    // panel). Side-by-side can't fit on ≤400px-wide screens without the
+    // portraits swallowing the monologue panel.
+    const narrow = width < 620;
     this.cameras.main.setBackgroundColor('#05070b');
 
     // Background image (optional): explicit key wins, else auto-derive from
@@ -98,12 +103,15 @@ export class VNScene extends Phaser.Scene {
     let portraitRightEdge = width;
     if (hasPortrait && portraitKey) {
       const tex = this.textures.get(portraitKey).getSourceImage() as HTMLImageElement;
-      const maxH = Math.min(height - 40, 720);
-      const scale = maxH / tex.height;
+      const maxH = narrow
+        ? Math.min(height * 0.36, 320)
+        : Math.min(height - 40, 720);
+      const maxW = narrow ? width * 0.44 : Infinity;
+      const scale = Math.min(maxH / tex.height, maxW / tex.width);
       const portraitW = tex.width * scale;
       // Right-anchor with a small margin. Portrait sits behind the panel stroke.
       const px = width - 24 - portraitW / 2;
-      const py = height / 2;
+      const py = narrow ? height * 0.3 : height / 2;
       // Start off-screen to the right; entry tween slides in on mount.
       const portrait = this.add.image(px + portraitW + 60, py, portraitKey)
         .setScale(scale)
@@ -138,11 +146,14 @@ export class VNScene extends Phaser.Scene {
     const mcKey = `portrait_${playerState.mcKey}`;
     if (this.textures.exists(mcKey)) {
       const mcTex = this.textures.get(mcKey).getSourceImage() as HTMLImageElement;
-      const mcMaxH = Math.min(height - 80, 640);
-      const mcScale = mcMaxH / mcTex.height;
+      const mcMaxH = narrow
+        ? Math.min(height * 0.34, 300)
+        : Math.min(height - 80, 640);
+      const mcMaxW = narrow ? width * 0.42 : Infinity;
+      const mcScale = Math.min(mcMaxH / mcTex.height, mcMaxW / mcTex.width);
       const mcW = mcTex.width * mcScale;
       const mcX = 24 + mcW / 2;
-      const mcY = height / 2;
+      const mcY = narrow ? height * 0.3 : height / 2;
       const mcImg = this.add.image(mcX - mcW - 60, mcY, mcKey)
         .setScale(mcScale)
         .setAlpha(0);
@@ -164,46 +175,56 @@ export class VNScene extends Phaser.Scene {
       });
     }
 
-    const cardX = 48;
-    const cardY = 72;
+    const cardX = narrow ? 24 : 48;
+    const cardY = narrow ? 36 : 72;
     if (data.speaker) {
       addText(this, cardX, cardY, data.speaker.name, {
-        fontSize: '28px',
+        fontSize: narrow ? '22px' : '28px',
         color: '#e8ecf1',
         fontStyle: 'bold',
       });
-      addText(this, cardX, cardY + 36, data.speaker.role.toUpperCase(), {
+      addText(this, cardX, cardY + (narrow ? 28 : 36), data.speaker.role.toUpperCase(), {
         fontSize: '12px',
         color: '#6eb4ff',
         fontStyle: 'bold',
       });
     } else if (data.speakerLabel) {
       addText(this, cardX, cardY, data.speakerLabel, {
-        fontSize: '22px',
+        fontSize: narrow ? '18px' : '22px',
         color: '#9ca6b8',
         fontStyle: 'italic',
       });
     }
 
-    const panelX = 48;
-    const panelY = 160;
+    const panelX = narrow ? 24 : 48;
+    // On narrow: panel sits *below* the portraits (stacked layout).
+    // On wide: panel starts near the top and the portraits flank it sideways.
+    const panelY = narrow ? Math.round(height * 0.52) : 160;
     // When a portrait is rendered, cap the panel so it doesn't overlap.
-    const rightLimit = hasPortrait ? portraitRightEdge : width - 48;
-    const panelW = Math.max(320, Math.min(920, rightLimit - panelX));
-    const panelH = Math.min(height - panelY - 140, 420);
+    // On narrow the panel is full-width regardless (portraits are above it).
+    const rightLimit = narrow
+      ? width - panelX
+      : (hasPortrait ? portraitRightEdge : width - 48);
+    const panelW = narrow
+      ? width - panelX * 2
+      : Math.max(320, Math.min(920, rightLimit - panelX));
+    const panelH = narrow
+      ? Math.min(height - panelY - 110, 360)
+      : Math.min(height - panelY - 140, 420);
     this.panelWidth = panelW;
 
-    // Translucent panel — lets the background art (champion Layer, narrator
-    // Grid-core, INIT-0 cover) read through while still sitting dark enough
-    // under the body text for contrast. Was fully opaque; the background was
-    // invisible behind monologue copy.
-    this.add.rectangle(panelX, panelY, panelW, panelH, 0x0c0f17, 0.72)
+    // Narrow panels get a darker overlay (0.85 vs 0.72) so the stacked
+    // portraits above don't bleed through at low contrast.
+    this.add.rectangle(panelX, panelY, panelW, panelH, 0x0c0f17, narrow ? 0.85 : 0.72)
       .setOrigin(0, 0)
       .setStrokeStyle(1, 0x1e2332);
 
-    const btnY = height - 64;
-    const btnX = width - 180;
-    this.btn = this.add.rectangle(btnX, btnY, 240, 52, 0x2a6df4)
+    const btnY = narrow ? height - 56 : height - 64;
+    const btnW = narrow ? 200 : 240;
+    const btnH = narrow ? 44 : 52;
+    // Narrow: center the button under the panel. Wide: right-anchored corner.
+    const btnX = narrow ? width / 2 : width - 180;
+    this.btn = this.add.rectangle(btnX, btnY, btnW, btnH, 0x2a6df4)
       .setStrokeStyle(2, 0x4f8bff);
     this.btnLabel = addText(this, btnX, btnY, '', {
       fontSize: '18px',
@@ -214,10 +235,14 @@ export class VNScene extends Phaser.Scene {
     this.btn.on('pointerout', () => !this.consumed && this.btn?.setFillStyle(0x2a6df4));
     this.btn.on('pointerup', () => this.fire());
 
-    addText(this, 48, height - 54, 'Press [Space] or [Enter] to continue', {
-      fontSize: '12px',
-      color: '#4a5063',
-    });
+    // Keyboard hint hidden on mobile — no physical keyboard, and the string
+    // overlaps the centered button on narrow layouts.
+    if (!narrow) {
+      addText(this, 48, height - 54, 'Press [Space] or [Enter] to continue', {
+        fontSize: '12px',
+        color: '#4a5063',
+      });
+    }
 
     this.input.keyboard?.on('keydown-SPACE', () => this.fire());
     this.input.keyboard?.on('keydown-ENTER', () => this.fire());
@@ -231,10 +256,10 @@ export class VNScene extends Phaser.Scene {
   }
 
   private renderPage() {
-    const { width } = this.scale;
+    const { width, height } = this.scale;
     const narrow = width < 620;
-    const panelX = 48;
-    const panelY = 160;
+    const panelX = narrow ? 24 : 48;
+    const panelY = narrow ? Math.round(height * 0.52) : 160;
     const panelW = this.panelWidth || Math.min(920, width - 96);
 
     this.streamTimer?.remove();

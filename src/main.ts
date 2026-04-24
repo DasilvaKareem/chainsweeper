@@ -1,3 +1,12 @@
+// Buffer polyfill for the browser — the BITE SDK (@skalenetwork/bite) uses
+// Node's global `Buffer` internally. Vite doesn't polyfill Node builtins by
+// default, so we inject it on `globalThis` before any BITE import reaches.
+// MUST stay first in main.ts, above any module that might pull in BITE.
+import { Buffer } from 'buffer';
+if (typeof (globalThis as unknown as { Buffer?: unknown }).Buffer === 'undefined') {
+  (globalThis as unknown as { Buffer: typeof Buffer }).Buffer = Buffer;
+}
+
 import * as Phaser from 'phaser';
 import './style.css';
 import { BootScene } from './scenes/BootScene';
@@ -15,6 +24,7 @@ import { MultiplayerHubScene } from './scenes/MultiplayerHubScene';
 import { PlotMapScene } from './scenes/PlotMapScene';
 import { PlotScene } from './scenes/PlotScene';
 import { PlotMarketScene } from './scenes/PlotMarketScene';
+import { SettingsScene } from './scenes/SettingsScene';
 
 new Phaser.Game({
   type: Phaser.AUTO,
@@ -41,5 +51,6 @@ new Phaser.Game({
     PlotMapScene,
     PlotScene,
     PlotMarketScene,
+    SettingsScene,
   ],
 });

@@ -62,6 +62,9 @@ export class MenuScene extends Phaser.Scene {
     this.makeButton(cx, height * 0.48 + 72, 'Multiplayer', () => {
       this.scene.start('MultiplayerHub');
     });
+    this.makeButton(cx, height * 0.48 + 144, 'Settings', () => {
+      this.scene.start('Settings');
+    });
 
     addText(this, cx, height - 30, 'v0.1 · local prototype', {
       fontSize: '12px',

@@ -4,9 +4,11 @@ import { audio } from '../audio/manager';
 import {
   PlotClient,
   encryptPlot,
-  BITE_SANDBOX_2,
+  SKALE_CHAIN,
   CONTRACTS,
   PlotStatus,
+  errMsg,
+  friendlyTxError,
 } from '../chain';
 import {
   connectTerritory,
@@ -54,9 +56,16 @@ export class PlotMapScene extends Phaser.Scene {
 
   // --- HUD (rendered by UI camera at zoom=1, unaffected by map zoom) ---
   private statusText?: Phaser.GameObjects.Text;
+  private walletText?: Phaser.GameObjects.Text;
   private hoverText?: Phaser.GameObjects.Text;
   private repairText?: Phaser.GameObjects.Text;
   private liveBadge?: Phaser.GameObjects.Text;
+  // Dedicated error banner — statusText is tiny and buried; errors here are
+  // large, center-screen, and dismiss on their own. Keep in sync with
+  // `showError` / `clearError`.
+  private errorBanner?: Phaser.GameObjects.Text;
+  private errorBannerBg?: Phaser.GameObjects.Rectangle;
+  private errorClearTimer?: Phaser.Time.TimerEvent;
   private uiCam?: Phaser.Cameras.Scene2D.Camera;
   private hudObjects: Phaser.GameObjects.GameObject[] = [];
 
@@ -120,6 +129,12 @@ export class PlotMapScene extends Phaser.Scene {
     this.hoverText = this.hudText(20, height - 30, '', { fontSize: '12px', color: '#6eb4ff' });
     this.repairText = this.hudText(width - 20, 48, '', { fontSize: '13px', color: '#f4a62a' })
       .setOrigin(1, 0);
+    // Persistent wallet readout — separate from statusText (which the live
+    // stream overwrites every ~10s). Shows "Not connected" until the user
+    // connects, then the address + native CREDIT balance.
+    this.walletText = this.hudText(width - 20, 72, 'Wallet: not connected', {
+      fontSize: '12px', color: '#8a92a4',
+    }).setOrigin(1, 0);
 
     this.makeHudButton(width - 20, 16, 'Back', () => this.leave());
     this.makeHudButton(width - 110, 16, 'Connect', () => this.connectWallet());
@@ -132,6 +147,19 @@ export class PlotMapScene extends Phaser.Scene {
     this.liveBadge.setDepth(10);
     this.hoverText.setDepth(10);
     this.repairText.setDepth(10);
+    this.walletText.setDepth(10);
+
+    // Error banner — hidden until showError() fires. Sits centered near the
+    // top; Phaser text doesn't wrap multi-line by default so we cap length
+    // in showError itself.
+    this.errorBannerBg = this.add.rectangle(width / 2, 110, 0, 0, 0x2a0f12, 0.92)
+      .setStrokeStyle(1, 0xff6b6b, 0.8)
+      .setVisible(false)
+      .setDepth(11);
+    this.errorBanner = this.hudText(width / 2, 110, '', {
+      fontSize: '14px', color: '#ffd6d6', align: 'center',
+    }).setOrigin(0.5, 0.5).setVisible(false).setDepth(12);
+    this.hudObjects.push(this.errorBannerBg);
 
     this.setupUiCamera();
     this.wirePanZoom();
@@ -518,19 +546,53 @@ export class PlotMapScene extends Phaser.Scene {
   // ---------------------------------------------------------------- wallet
 
   private async connectWallet() {
-    if (!this.statusText) return;
+    if (!this.statusText || !this.walletText) return;
+    this.walletText.setText('Wallet: connecting…').setColor('#f4a62a');
     try {
       this.client = await PlotClient.connect();
-      this.statusText.setText(`Wallet: ${short(this.client.address)}`);
-      const bal = await this.client.repairBalance().catch(() => 0);
-      this.repairText?.setText(`Repair Items · ${bal}`);
+      // Immediate ack on the persistent wallet line, BEFORE any async balance
+      // reads — so the user sees the connection succeeded even if the RPC is
+      // slow to return balance/repair info.
+      this.walletText.setText(`Wallet: ${short(this.client.address)} · …`).setColor('#6eff9c');
+
+      const [nativeWei, repairBal] = await Promise.all([
+        this.client.nativeBalance().catch(() => 0n),
+        this.client.repairBalance().catch(() => 0),
+      ]);
+      this.repairText?.setText(`Repair Items · ${repairBal}`);
+      this.applyWalletReadout(nativeWei);
+
       // Force a re-render so "mine" highlighting applies to visible tiles.
       for (const [key, tile] of this.rendered) {
         const entry = this.index.get(key);
         if (entry) this.restyleTile(tile, entry);
       }
     } catch (err) {
-      this.statusText.setText(`Connect failed: ${errMsg(err)}`);
+      console.error('[wallet] connect failed', err);
+      this.walletText.setText('Wallet: not connected').setColor('#8a92a4');
+      this.showError(`Connect failed — ${friendlyTxError(err)}`);
+    }
+  }
+
+  /**
+   * Render the wallet + balance line. If the balance can't cover one plot
+   * mint we surface the faucet URL directly in the HUD — otherwise the user
+   * clicks a tile, sees MetaMask fail with a cryptic "insufficient funds"
+   * error, and has no idea where to get more CREDIT.
+   */
+  private applyWalletReadout(nativeWei: bigint) {
+    if (!this.walletText || !this.client) return;
+    const addr = short(this.client.address);
+    const bal = formatEthShort(nativeWei);
+    const sym = SKALE_CHAIN.nativeSymbol;
+    if (nativeWei < this.client.plotPriceWei) {
+      this.walletText
+        .setText(`Wallet: ${addr} · ${bal} ${sym} — faucet: base-sepolia-faucet.skale.space`)
+        .setColor('#f4a62a');
+    } else {
+      this.walletText
+        .setText(`Wallet: ${addr} · ${bal} ${sym}`)
+        .setColor('#6eff9c');
     }
   }
 
@@ -558,29 +620,84 @@ export class PlotMapScene extends Phaser.Scene {
 
   private async handleEmptyClick(plotX: number, plotY: number) {
     if (!this.client) {
-      this.statusText?.setText('Connect your wallet to mint.');
+      this.showError('Connect your wallet to mint.');
       return;
     }
     if (this.index.has(coordKey(plotX, plotY))) return;
 
+    // Pre-flight balance check. Catches the "why nothing happens" case where
+    // MetaMask silently rejects for underfunded wallets — we'd rather tell
+    // the user directly + point at the faucet.
+    const preBal = await this.client.nativeBalance().catch(() => 0n);
+    if (preBal < this.client.plotPriceWei) {
+      this.showError(
+        `Not enough ${SKALE_CHAIN.nativeSymbol}. ` +
+        `Need ${formatEthShort(this.client.plotPriceWei)}, have ${formatEthShort(preBal)}. ` +
+        `Faucet: base-sepolia-faucet.skale.space`,
+      );
+      this.applyWalletReadout(preBal);
+      return;
+    }
+
     const confirmed = window.confirm(
       `Mint plot at (${plotX}, ${plotY})?\n` +
-      `Price: ${formatEthShort(this.client.plotPriceWei)} sFUEL`,
+      `Price: ${formatEthShort(this.client.plotPriceWei)} ${SKALE_CHAIN.nativeSymbol}`,
     );
     if (!confirmed) return;
 
     const salt = Math.floor(Math.random() * 2 ** 30);
-    this.statusText?.setText(`Encrypting plot (${plotX},${plotY})…`);
+    this.clearError();
+    this.statusText?.setText(`Encrypting plot (${plotX},${plotY})… (64 BITE calls)`);
+    console.log('[mint] encrypting plot', { plotX, plotY, salt, rpc: SKALE_CHAIN.rpcUrl });
     try {
-      const plot = await encryptPlot(BITE_SANDBOX_2.rpcUrl, CONTRACTS.plots, plotX, plotY, salt);
+      const plot = await encryptPlot(SKALE_CHAIN.rpcUrl, CONTRACTS.plots, plotX, plotY, salt);
+      console.log('[mint] encrypt done, submitting tx');
       this.statusText?.setText('Submitting mint tx…');
       const hash = await this.client.mintPlot(plotX, plotY, plot.cipherCells);
+      console.log('[mint] tx confirmed', hash);
       this.statusText?.setText(`Minted ${hash.slice(0, 10)}… · waiting for the index to catch up`);
-      // No manual refresh — the DO will push an update to us within
-      // POLL_INTERVAL_MS (~10s).
+      // No manual refresh on the map — the DO will push an update to us
+      // within POLL_INTERVAL_MS (~10s). Refresh the wallet line though so
+      // the balance readout reflects the mint cost.
+      this.client.nativeBalance()
+        .then((bal) => this.applyWalletReadout(bal))
+        .catch(() => {});
     } catch (err) {
-      this.statusText?.setText(`Mint failed: ${errMsg(err)}`);
+      console.error('[mint] failed', err);
+      this.showError(`Mint failed — ${friendlyTxError(err)}`);
+      this.statusText?.setText('Mint failed (see banner).');
     }
+  }
+
+  /**
+   * Show a prominent, persistent (12s) error banner centered near the top
+   * of the scene. Raw errors (stack frames, HRESULT codes, etc.) go to the
+   * console; the banner gets the friendly message.
+   *
+   * Called on connect failures and tx failures. Calling it again replaces
+   * the previous message, so the most recent problem always wins.
+   */
+  private showError(message: string) {
+    if (!this.errorBanner || !this.errorBannerBg) return;
+    // Hard cap at ~180 chars so the banner doesn't grow off-screen. Phaser
+    // text doesn't wrap by default; for longer messages the full text is in
+    // the console.
+    const short = message.length > 180 ? message.slice(0, 177) + '…' : message;
+    this.errorBanner.setText(short).setVisible(true);
+    const bounds = this.errorBanner.getBounds();
+    this.errorBannerBg
+      .setPosition(this.errorBanner.x, this.errorBanner.y)
+      .setSize(bounds.width + 32, bounds.height + 16)
+      .setVisible(true);
+    this.errorClearTimer?.remove();
+    this.errorClearTimer = this.time.delayedCall(12_000, () => this.clearError());
+  }
+
+  private clearError() {
+    this.errorBanner?.setVisible(false);
+    this.errorBannerBg?.setVisible(false);
+    this.errorClearTimer?.remove();
+    this.errorClearTimer = undefined;
   }
 
   private leave() {
@@ -646,9 +763,6 @@ function short(addr: string): string {
   return addr.slice(0, 6) + '…' + addr.slice(-4);
 }
 
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 function formatEthShort(wei: bigint): string {
   const whole = wei / 10n ** 14n;

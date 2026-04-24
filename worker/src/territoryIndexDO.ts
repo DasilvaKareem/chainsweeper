@@ -18,6 +18,14 @@ interface Env {
   SKALE_RPC_URL: string;
   PLOTS_ADDRESS: string;
   MARKETPLACE_ADDRESS: string;
+  /**
+   * Block at which the Plots contract was deployed. Starting from 0 on a
+   * long-running public chain (~1.6M blocks on SKALE Base Sepolia at deploy
+   * time) means thousands of sequential eth_getLogs calls before the DO can
+   * answer a websocket upgrade — blowing the Worker CPU budget. Set this to
+   * the deploy block (or a recent block) to keep cold starts fast.
+   */
+  FROM_BLOCK: string;
 }
 
 // Topic hashes precomputed from the event signatures. Regenerate via:
@@ -70,8 +78,11 @@ export class TerritoryIndex {
   private plots = new Map<string, PlotEntry>();
   private byToken = new Map<string, string>(); // tokenId hex → coord key
 
-  // Block scan state. lastBlock tracks where incremental polling resumes.
+  // Block scan state. lastBlock tracks where incremental polling resumes;
+  // initFromBlock remembers the anchor used on cold start so full-rescans
+  // don't drift back to block 0.
   private lastBlock = 0;
+  private initFromBlock = 0;
   private lastFullRescanAt = 0;
   private scanning = false;
   private initialized = false;
@@ -142,11 +153,16 @@ export class TerritoryIndex {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
       try {
-        // Cold start: full scan from block 0. This can be slow on a heavily-
-        // populated chain; we accept the first-connect latency in exchange
-        // for up-to-date data.
+        // Cold start: scan from the configured FROM_BLOCK (set to the
+        // Plots-contract deploy block via wrangler.toml). Scanning from 0 on
+        // a 1.6M-block chain runs thousands of sequential eth_getLogs calls
+        // before we can answer the websocket upgrade, which blows the Worker
+        // CPU budget. The periodic full rescan (every 10m) uses the same
+        // anchor, so missed/reorg events still heal.
+        const fromBlock = parseFromBlock(this.env.FROM_BLOCK);
         const head = await this.getBlockNumber();
-        await this.scanRange(0, head);
+        this.initFromBlock = fromBlock;
+        await this.scanRange(fromBlock, head);
         this.lastBlock = head;
         this.lastFullRescanAt = Date.now();
         this.initialized = true;
@@ -190,7 +206,7 @@ export class TerritoryIndex {
     this.plots = fresh;
     this.byToken = freshByToken;
     try {
-      await this.scanRange(0, head);
+      await this.scanRange(this.initFromBlock, head);
     } catch (err) {
       // Roll back on failure — a half-rebuilt index is worse than a stale one.
       this.plots = prevPlots;
@@ -471,6 +487,18 @@ function decodeUint(hex64: string): bigint {
 function decodeAddress(word: string): string {
   const clean = stripHex(word);
   return '0x' + clean.slice(-40);
+}
+
+/**
+ * Parse FROM_BLOCK env value. Accepts decimal ("1628770"), hex ("0x18da62"),
+ * or empty (→ 0). We default to 0 rather than throwing so the worker boots
+ * locally without the var set, but production deploys should always supply
+ * the Plots contract's deploy block.
+ */
+function parseFromBlock(raw: string | undefined): number {
+  if (!raw) return 0;
+  const n = raw.startsWith('0x') ? parseInt(raw, 16) : parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

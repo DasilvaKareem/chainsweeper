@@ -3,14 +3,14 @@ pragma solidity ^0.8.27;
 
 /// @title MinimalERC721
 /// @notice Stripped-down ERC-721 implementation sized for MachineSweep's
-///         needs. We inline it because BITE V2 sandbox 2 requires `istanbul`
-///         EVM, but the vendored OpenZeppelin 5.6.x emits Cancun-only `mcopy`.
+///         needs. We inline it because the BITE V2 EVM target is `istanbul`,
+///         but the vendored OpenZeppelin 5.6.x emits Cancun-only `mcopy`.
 ///         This file implements only the interface surface Plots + Marketplace
 ///         actually touch: ownerOf, balanceOf, transferFrom, safeTransferFrom,
 ///         approve, setApprovalForAll, plus the ERC-165 + metadata hooks a
 ///         marketplace needs.
-// Swap to OpenZeppelin's ERC721 if/when the project targets a Cancun-capable
-// EVM (BITE sandbox 2 is istanbul-only, which OZ 5.2+ breaks via mcopy).
+// Swap to OpenZeppelin's ERC721 if/when SKALE confirms Cancun support on the
+// target chain (SKALE Base Sepolia today is still Istanbul).
 abstract contract MinimalERC721 {
     string public name;
     string public symbol;

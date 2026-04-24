@@ -121,6 +121,12 @@ export class DialogueScene extends Phaser.Scene {
       }
     }
 
+    // On narrow / portrait-orientation screens (phones), portraits share
+    // horizontal space so they must be small enough to sit side-by-side above
+    // the text box. On wider screens we keep the cinematic big-portrait layout
+    // that flanks the dialogue panel.
+    const isMobile = width < 600;
+
     // Optional character portrait, right-anchored. Rendered after BG so it
     // layers above it, but before the dialogue panel so the panel covers the
     // portrait where text appears — portrait peeks out from behind.
@@ -128,11 +134,14 @@ export class DialogueScene extends Phaser.Scene {
       const portraitKey = `portrait_${data.speakerId}`;
       if (this.textures.exists(portraitKey)) {
         const tex = this.textures.get(portraitKey).getSourceImage() as HTMLImageElement;
-        const maxH = Math.min(height * 0.85, 760);
-        const scale = maxH / tex.height;
+        const maxH = isMobile
+          ? Math.min(height * 0.38, 340)
+          : Math.min(height * 0.85, 760);
+        const maxW = isMobile ? width * 0.44 : Infinity;
+        const scale = Math.min(maxH / tex.height, maxW / tex.width);
         const portraitW = tex.width * scale;
         const px = width - 24 - portraitW / 2;
-        const py = height / 2;
+        const py = isMobile ? height * 0.27 : height / 2;
         // Start off-screen to the right so the portrait slides in on mount.
         const portrait = this.add.image(px + portraitW + 60, py, portraitKey)
           .setScale(scale)
@@ -169,11 +178,14 @@ export class DialogueScene extends Phaser.Scene {
       const mcKey = `portrait_${playerState.mcKey}`;
       if (this.textures.exists(mcKey)) {
         const tex = this.textures.get(mcKey).getSourceImage() as HTMLImageElement;
-        const maxH = Math.min(height * 0.78, 700);
-        const scale = maxH / tex.height;
+        const maxH = isMobile
+          ? Math.min(height * 0.36, 320)
+          : Math.min(height * 0.78, 700);
+        const maxW = isMobile ? width * 0.42 : Infinity;
+        const scale = Math.min(maxH / tex.height, maxW / tex.width);
         const mcW = tex.width * scale;
         const mx = 24 + mcW / 2;
-        const my = height / 2;
+        const my = isMobile ? height * 0.27 : height / 2;
         const mc = this.add.image(mx - mcW - 60, my, mcKey)
           .setScale(scale)
           .setAlpha(0);
@@ -199,19 +211,20 @@ export class DialogueScene extends Phaser.Scene {
     }
 
     if (data.title) {
-      addText(this, cx, height * 0.18, data.title, {
-        fontSize: '42px', color: '#e8ecf1',
+      addText(this, cx, isMobile ? height * 0.07 : height * 0.18, data.title, {
+        fontSize: isMobile ? '28px' : '42px', color: '#e8ecf1',
       }).setOrigin(0.5);
     }
     if (data.speaker) {
-      addText(this, cx, height * 0.18 + 52, data.speaker, {
+      addText(this, cx, (isMobile ? height * 0.07 : height * 0.18) + (isMobile ? 34 : 52), data.speaker, {
         fontSize: '14px', color: '#6eb4ff', fontStyle: 'bold',
       }).setOrigin(0.5);
     }
 
-    this.btn = this.add.rectangle(cx, height - 100, 240, 52, 0x2a6df4)
+    const btnY = isMobile ? height - 72 : height - 100;
+    this.btn = this.add.rectangle(cx, btnY, isMobile ? 200 : 240, isMobile ? 48 : 52, 0x2a6df4)
       .setStrokeStyle(2, 0x4f8bff);
-    this.btnLabel = addText(this, cx, height - 100, '', {
+    this.btnLabel = addText(this, cx, btnY, '', {
       fontSize: '18px', color: '#ffffff',
     }).setOrigin(0.5);
     this.btn.setInteractive({ useHandCursor: true });
@@ -275,11 +288,17 @@ export class DialogueScene extends Phaser.Scene {
 
     const { width, height } = this.scale;
     const cx = width / 2;
-    const boxW = Math.min(620, width - 160);
+    const isMobile = width < 600;
+    // On mobile: widen the box almost to the screen edges, lower it so the
+    // portraits sit above it, and give it more vertical height so wrapped
+    // lines don't spill below the panel edge.
+    const boxW = isMobile
+      ? Math.min(width - 24, 560)
+      : Math.min(620, width - 160);
     const panelCx = cx + style.offsetX;
     const boxX = panelCx - boxW / 2;
-    const boxY = height * 0.4;
-    const panelH = 140;
+    const boxY = isMobile ? height * 0.54 : height * 0.4;
+    const panelH = isMobile ? 200 : 140;
 
     // MC beats use the selected real name (Samuel / Samantha) as the speaker
     // tag, overriding the generic 'OPERATOR' default in STYLE.mc.
@@ -339,8 +358,12 @@ export class DialogueScene extends Phaser.Scene {
     if (!this.textures.exists(key)) return;
     const tex = this.textures.get(key).getSourceImage() as HTMLImageElement;
     const { width, height } = this.scale;
-    const maxH = Math.min(height * 0.85, 760);
-    const scale = maxH / tex.height;
+    const isMobile = width < 600;
+    const maxH = isMobile
+      ? Math.min(height * 0.38, 340)
+      : Math.min(height * 0.85, 760);
+    const maxW = isMobile ? width * 0.44 : Infinity;
+    const scale = Math.min(maxH / tex.height, maxW / tex.width);
     const portraitW = tex.width * scale;
     const px = width - 24 - portraitW / 2;
     this.portraitImg.setTexture(key).setScale(scale);
