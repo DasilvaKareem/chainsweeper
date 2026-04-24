@@ -9,12 +9,20 @@
 // done. Reconnect is the caller's concern for now — the PlotMapScene handles
 // it by re-subscribing on retry.
 
+export interface PlotCellEntry {
+  x: number;
+  y: number;
+  state: 1 | 2; // safe | core
+  adjacency: number;
+}
+
 export interface PlotEntry {
   tokenId: string; // hex (lowercased)
   x: number;
   y: number;
   owner: string;
   status: 0 | 1 | 2; // Uncleared | Cleared | Corrupted
+  cells?: PlotCellEntry[];
   listed: boolean;
   price: string; // wei as decimal string (use BigInt(price) to do math)
   mintedAt: number; // unix seconds

@@ -1,4 +1,5 @@
 import * as Phaser from 'phaser';
+import { Contract, JsonRpcProvider } from 'ethers';
 import { addText } from '../ui/text';
 import { audio } from '../audio/manager';
 import {
@@ -16,6 +17,7 @@ import {
   type TerritoryClient,
   type TerritoryEvent,
 } from '../net/territory';
+import { PLOTS_ABI } from '../chain/abi';
 
 // World-space pixels per plot on the map. In-plot board is 8x8, rendered
 // here as a TILE_SIZE-wide status tile.
@@ -37,7 +39,10 @@ const VIEWPORT_PAD_PLOTS = 2;
 interface TileObjects {
   rect: Phaser.GameObjects.Rectangle;
   glyph: Phaser.GameObjects.Text;
+  miniBoard?: Phaser.GameObjects.Graphics;
+  miniLabels: Phaser.GameObjects.Text[];
   scar?: Phaser.GameObjects.Graphics;
+  cellsSignature?: string;
 }
 
 /**
@@ -87,6 +92,10 @@ export class PlotMapScene extends Phaser.Scene {
   // Currently rendered tiles, keyed by coord. Recycled on pan/zoom rather
   // than torn down and rebuilt to minimize churn.
   private rendered = new Map<string, TileObjects>();
+  private readProvider?: JsonRpcProvider;
+  private readPlotsC?: Contract;
+  private hydratedCellTokens = new Set<string>();
+  private hydratingCellTokens = new Set<string>();
 
   // Re-render debounce + viewport change tracking.
   private viewportDirty = true;
@@ -302,8 +311,10 @@ export class PlotMapScene extends Phaser.Scene {
       const mine = this.client && cached.owner.toLowerCase() === this.client.address.toLowerCase();
       const status = plotStatusLabel(cached.status);
       const listing = cached.listed ? ` · LISTED` : '';
+      const revealed = revealedCells(cached).length;
+      const progress = revealed > 0 ? ` · ${revealed}/64 cells visible` : '';
       this.hoverText.setText(
-        `(${plotX},${plotY})  ${status}${listing}  ·  ${short(cached.owner)}${mine ? ' (you)' : ''}`,
+        `(${plotX},${plotY})  ${status}${listing}${progress}  ·  ${short(cached.owner)}${mine ? ' (you)' : ''}`,
       );
     } else {
       this.hoverText.setText(`(${plotX},${plotY})  · empty · click to mint`);
@@ -408,7 +419,9 @@ export class PlotMapScene extends Phaser.Scene {
       scar.setDepth(0.5);
       this.plotLayer!.add(scar);
     }
-    return { rect, glyph, scar };
+    const tile: TileObjects = { rect, glyph, scar, miniLabels: [] };
+    this.renderMiniBoard(tile, entry);
+    return tile;
   }
 
   private restyleTile(tile: TileObjects, entry: PlotEntry) {
@@ -418,6 +431,7 @@ export class PlotMapScene extends Phaser.Scene {
     tile.rect.setFillStyle(fill, 1);
     tile.rect.setStrokeStyle(mine ? 3 : (entry.listed ? 2 : 1), mine ? 0xffffff : stroke, 1);
     tile.glyph.setText(statusGlyph(entry.status));
+    this.renderMiniBoard(tile, entry);
 
     const { cx, cy } = this.plotToWorldCenter(entry.x, entry.y);
     const wantScar = entry.status === PlotStatus.Corrupted;
@@ -438,7 +452,128 @@ export class PlotMapScene extends Phaser.Scene {
     if (i >= 0) this.zoomInvariantTexts.splice(i, 1);
     tile.rect.destroy();
     tile.glyph.destroy();
+    tile.miniBoard?.destroy();
+    for (const label of tile.miniLabels) label.destroy();
     tile.scar?.destroy();
+  }
+
+  private renderMiniBoard(tile: TileObjects, entry: PlotEntry) {
+    const cells = revealedCells(entry);
+    const signature = cells.length === 0
+      ? `empty:${entry.status}`
+      : cells.map((c) => `${c.x},${c.y},${c.state},${c.adjacency}`).join('|');
+    if (tile.cellsSignature === signature) return;
+    tile.cellsSignature = signature;
+
+    tile.miniBoard?.destroy();
+    tile.miniBoard = undefined;
+    for (const label of tile.miniLabels) label.destroy();
+    tile.miniLabels = [];
+
+    tile.glyph.setVisible(cells.length === 0);
+    if (cells.length === 0) {
+      this.hydrateMissingCells(entry);
+      return;
+    }
+
+    const { cx, cy } = this.plotToWorldCenter(entry.x, entry.y);
+    const boardPx = TILE_SIZE - 8;
+    const cellPx = boardPx / 8;
+    const left = cx - boardPx / 2;
+    const top = cy - boardPx / 2;
+    const g = this.add.graphics();
+    g.setDepth(0.65);
+
+    g.lineStyle(1, 0x0d1118, 0.75);
+    for (let i = 0; i <= 8; i++) {
+      const pos = i * cellPx;
+      g.lineBetween(left + pos, top, left + pos, top + boardPx);
+      g.lineBetween(left, top + pos, left + boardPx, top + pos);
+    }
+
+    for (const cell of cells) {
+      const x = left + cell.x * cellPx;
+      const y = top + cell.y * cellPx;
+      const isCore = cell.state === 2;
+      g.fillStyle(isCore ? 0x5c1f1f : 0x10151c, isCore ? 0.95 : 0.88);
+      g.fillRect(x + 0.5, y + 0.5, cellPx - 1, cellPx - 1);
+      g.lineStyle(1, isCore ? 0xff6b6b : 0x263243, 0.85);
+      g.strokeRect(x + 0.5, y + 0.5, cellPx - 1, cellPx - 1);
+
+      const text = isCore ? '◆' : (cell.adjacency > 0 ? String(cell.adjacency) : '');
+      if (!text) continue;
+      const label = addText(this, x + cellPx / 2, y + cellPx / 2, text, {
+        fontSize: '7px',
+        color: isCore ? '#ff6b6b' : adjacencyColor(cell.adjacency),
+        fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(1.2);
+      tile.miniLabels.push(label);
+    }
+
+    this.plotLayer!.add([g, ...tile.miniLabels]);
+    tile.miniBoard = g;
+  }
+
+  private hydrateMissingCells(entry: PlotEntry) {
+    // Newer TerritoryIndex payloads include `cells`. If the field is absent,
+    // hydrate visible tiles directly from the read-only chain RPC so the map
+    // still shows revealed numbers before/without a worker redeploy.
+    if (entry.cells !== undefined) return;
+    const tokenKey = entry.tokenId.toLowerCase();
+    if (this.hydratedCellTokens.has(tokenKey) || this.hydratingCellTokens.has(tokenKey)) return;
+
+    const plotsC = this.getReadPlotsContract();
+    if (!plotsC) return;
+
+    this.hydratingCellTokens.add(tokenKey);
+    void this.fetchRevealedCells(plotsC, entry)
+      .catch((err) => console.warn('[territory] cell hydrate failed', err))
+      .finally(() => {
+        this.hydratingCellTokens.delete(tokenKey);
+        this.hydratedCellTokens.add(tokenKey);
+      });
+  }
+
+  private getReadPlotsContract(): Contract | null {
+    if (CONTRACTS.plots === '0x0000000000000000000000000000000000000000') return null;
+    this.readProvider ??= new JsonRpcProvider(SKALE_CHAIN.rpcUrl);
+    this.readPlotsC ??= new Contract(CONTRACTS.plots, PLOTS_ABI, this.readProvider);
+    return this.readPlotsC;
+  }
+
+  private async fetchRevealedCells(plotsC: Contract, entry: PlotEntry) {
+    const tokenId = BigInt(entry.tokenId);
+    const reads: Promise<{ x: number; y: number; state: 0 | 1 | 2; adjacency: number }>[] = [];
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        reads.push(
+          plotsC.getCell(tokenId, x, y).then((raw: { state: bigint; adjacency: bigint }) => ({
+            x,
+            y,
+            state: Number(raw.state) as 0 | 1 | 2,
+            adjacency: Number(raw.adjacency),
+          })),
+        );
+      }
+    }
+
+    const cells = (await Promise.all(reads))
+      .filter((cell) => cell.state !== 0)
+      .map((cell) => ({
+        x: cell.x,
+        y: cell.y,
+        state: cell.state as 1 | 2,
+        adjacency: cell.adjacency,
+      }));
+
+    const key = coordKey(entry.x, entry.y);
+    const current = this.index.get(key);
+    if (!current || current.tokenId.toLowerCase() !== entry.tokenId.toLowerCase()) return;
+
+    const next: PlotEntry = { ...current, cells };
+    this.index.set(key, next);
+    const tile = this.rendered.get(key);
+    if (tile) this.restyleTile(tile, next);
   }
 
   private drawCorruptionScar(cx: number, cy: number): Phaser.GameObjects.Graphics {
@@ -759,6 +894,24 @@ function plotStatusLabel(s: PlotStatus): string {
   }
 }
 
+function revealedCells(entry: PlotEntry): NonNullable<PlotEntry['cells']> {
+  return Array.isArray(entry.cells) ? entry.cells : [];
+}
+
+function adjacencyColor(n: number): string {
+  switch (n) {
+    case 1: return '#6eb4ff';
+    case 2: return '#6eff9c';
+    case 3: return '#ffd86e';
+    case 4: return '#f4a62a';
+    case 5: return '#ff9f6b';
+    case 6: return '#ff6bb4';
+    case 7: return '#c26bff';
+    case 8: return '#ff6b6b';
+    default: return '#aab0bf';
+  }
+}
+
 function short(addr: string): string {
   return addr.slice(0, 6) + '…' + addr.slice(-4);
 }
@@ -769,4 +922,3 @@ function formatEthShort(wei: bigint): string {
   const str = (Number(whole) / 10_000).toFixed(4);
   return str.replace(/\.?0+$/, '');
 }
-

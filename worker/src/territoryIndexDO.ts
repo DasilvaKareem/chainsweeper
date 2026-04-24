@@ -33,6 +33,7 @@ interface Env {
 // If a contract event signature changes, the hash must be updated here too.
 const TOPIC = {
   PlotMinted:     '0x6e56a84a585f0232238a20d76053f6613c3494c6c866718580bee6f49dec0b84',
+  CellRevealed:   '0x7b7b447af23c59c2c9e9d34f7126f220d3aa7f835c77bd424fecaaec2e53012d',
   PlotCleared:    '0x2dae6bc4425f8b6e7ada4ba71f7c1ec2a1d936e130eb7b8bc58d6371c670881d',
   PlotCorrupted:  '0x4eec20d54356b4609fcc68c751b73416d476d2063eab2450f9275a36118157c2',
   PlotRepaired:   '0x4417352289f08fab8da6ffd6b8c6df1a87f1d04399547b1253bec5c9052998a2',
@@ -51,12 +52,20 @@ const FULL_RESCAN_INTERVAL_MS = 10 * 60 * 1000;
 // Max blocks per eth_getLogs call. SKALE has a default cap; pick conservatively.
 const SCAN_CHUNK = 1000;
 
+interface PlotCellEntry {
+  x: number;
+  y: number;
+  state: 1 | 2; // safe | core
+  adjacency: number;
+}
+
 interface PlotEntry {
   tokenId: string;   // hex (bigint would blow out JSON)
   x: number;
   y: number;
   owner: string;
   status: 0 | 1 | 2; // Uncleared | Cleared | Corrupted
+  cells: PlotCellEntry[];
   listed: boolean;
   price: string;     // wei as decimal string
   mintedAt: number;  // block timestamp (seconds)
@@ -254,9 +263,10 @@ export class TerritoryIndex {
 
     if (addr === plotsAddr) {
       if (topic0 === TOPIC.PlotMinted) return this.onPlotMinted(log);
+      if (topic0 === TOPIC.CellRevealed) return this.onCellRevealed(log);
       if (topic0 === TOPIC.PlotCleared) return this.onPlotStatus(log, 1);
       if (topic0 === TOPIC.PlotCorrupted) return this.onPlotStatus(log, 2);
-      if (topic0 === TOPIC.PlotRepaired) return this.onPlotStatus(log, 0);
+      if (topic0 === TOPIC.PlotRepaired) return this.onPlotStatus(log, 0, true);
       if (topic0 === TOPIC.Transfer) return this.onTransfer(log);
     } else if (addr === mktAddr) {
       if (topic0 === TOPIC.Listed) return this.onListed(log);
@@ -285,6 +295,7 @@ export class TerritoryIndex {
       x, y,
       owner,
       status: 0,
+      cells: [],
       listed: false,
       price: '0',
       mintedAt,
@@ -294,13 +305,42 @@ export class TerritoryIndex {
     this.broadcast({ type: 'update', plot: entry });
   }
 
-  private onPlotStatus(log: RawLog, status: 0 | 1 | 2) {
+  private onCellRevealed(log: RawLog) {
+    // CellRevealed(uint256 indexed tokenId, uint8 x, uint8 y, bool wasCore, uint8 adjacency)
     const tokenId = (log.topics[1] ?? '').toLowerCase();
     const coord = this.byToken.get(tokenId);
     if (!coord) return;
     const prev = this.plots.get(coord);
     if (!prev) return;
-    const next: PlotEntry = { ...prev, status };
+
+    const data = stripHex(log.data);
+    const x = Number(decodeUint(data.slice(0, 64)));
+    const y = Number(decodeUint(data.slice(64, 128)));
+    const wasCore = decodeUint(data.slice(128, 192)) !== 0n;
+    const adjacency = Number(decodeUint(data.slice(192, 256)));
+    const nextCell: PlotCellEntry = {
+      x,
+      y,
+      state: wasCore ? 2 : 1,
+      adjacency,
+    };
+
+    const cells = prev.cells.filter((c) => c.x !== x || c.y !== y);
+    cells.push(nextCell);
+    cells.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+    const next: PlotEntry = { ...prev, cells };
+    this.plots.set(coord, next);
+    this.broadcast({ type: 'update', plot: next });
+  }
+
+  private onPlotStatus(log: RawLog, status: 0 | 1 | 2, resetCells = false) {
+    const tokenId = (log.topics[1] ?? '').toLowerCase();
+    const coord = this.byToken.get(tokenId);
+    if (!coord) return;
+    const prev = this.plots.get(coord);
+    if (!prev) return;
+    const next: PlotEntry = { ...prev, status, cells: resetCells ? [] : prev.cells };
     this.plots.set(coord, next);
     this.broadcast({ type: 'update', plot: next });
   }
@@ -443,6 +483,7 @@ export class TerritoryIndex {
 
 const TOPIC_PLOT = {
   PlotMinted: TOPIC.PlotMinted,
+  CellRevealed: TOPIC.CellRevealed,
   PlotCleared: TOPIC.PlotCleared,
   PlotCorrupted: TOPIC.PlotCorrupted,
   PlotRepaired: TOPIC.PlotRepaired,
