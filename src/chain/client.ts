@@ -1,13 +1,12 @@
 import {
-  BrowserProvider,
   Contract,
   type ContractEventPayload,
-  type Eip1193Provider,
+  type JsonRpcSigner,
   type Log,
 } from 'ethers';
 import { MATCH_ABI, RATINGS_ABI } from './abi';
-import { SKALE_CHAIN, CONTRACTS, CTX_GAS_PAYMENT_WEI } from './config';
-import { switchOrAddChain } from './wallet';
+import { CONTRACTS, CTX_GAS_PAYMENT_WEI } from './config';
+import { connectInjectedWallet } from './wallet';
 import {
   type ChainCell,
   type ChainMatch,
@@ -39,19 +38,18 @@ export class ChainClient {
    * SKALE Base Sepolia. Throws if no wallet is installed or the user rejects.
    */
   static async connect(): Promise<ChainClient> {
-    const eip1193 = (globalThis as unknown as { ethereum?: Eip1193Provider }).ethereum;
-    if (!eip1193) throw new Error('No wallet detected — install MetaMask or similar');
+    const session = await connectInjectedWallet(true);
+    if (!session) throw new Error('No wallet account selected');
+    return ChainClient.fromWalletSession(session.signer, session.address);
+  }
 
-    const provider = new BrowserProvider(eip1193);
-    await provider.send('eth_requestAccounts', []);
+  static async reconnect(): Promise<ChainClient | null> {
+    const session = await connectInjectedWallet(false);
+    if (!session) return null;
+    return ChainClient.fromWalletSession(session.signer, session.address);
+  }
 
-    const network = await provider.getNetwork();
-    if (Number(network.chainId) !== SKALE_CHAIN.chainId) {
-      await switchOrAddChain(eip1193);
-    }
-
-    const signer = await provider.getSigner();
-    const address = await signer.getAddress();
+  private static fromWalletSession(signer: JsonRpcSigner, address: string): ChainClient {
     const matchC = new Contract(CONTRACTS.match, MATCH_ABI, signer);
     const ratingsC = new Contract(CONTRACTS.ratings, RATINGS_ABI, signer);
     return new ChainClient(matchC, ratingsC, address);

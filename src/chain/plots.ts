@@ -2,18 +2,17 @@ import {
   BrowserProvider,
   Contract,
   type ContractEventPayload,
-  type Eip1193Provider,
+  type JsonRpcSigner,
   type Log,
 } from 'ethers';
 import { MARKETPLACE_ABI, PLOTS_ABI, REPAIRS_ABI } from './abi';
 import {
-  SKALE_CHAIN,
   CONTRACTS,
   CTX_GAS_PAYMENT_WEI,
   PLOT_PRICE_WEI_DEFAULT,
   REPAIR_PRICE_WEI_DEFAULT,
 } from './config';
-import { switchOrAddChain } from './wallet';
+import { connectInjectedWallet } from './wallet';
 import {
   type CellRevealedEvent,
   type ChainPlot,
@@ -63,19 +62,22 @@ export class PlotClient {
   }
 
   static async connect(): Promise<PlotClient> {
-    const eip1193 = (globalThis as unknown as { ethereum?: Eip1193Provider }).ethereum;
-    if (!eip1193) throw new Error('No wallet detected — install MetaMask or similar');
+    const session = await connectInjectedWallet(true);
+    if (!session) throw new Error('No wallet account selected');
+    return PlotClient.fromWalletSession(session.provider, session.signer, session.address);
+  }
 
-    const provider = new BrowserProvider(eip1193);
-    await provider.send('eth_requestAccounts', []);
+  static async reconnect(): Promise<PlotClient | null> {
+    const session = await connectInjectedWallet(false);
+    if (!session) return null;
+    return PlotClient.fromWalletSession(session.provider, session.signer, session.address);
+  }
 
-    const network = await provider.getNetwork();
-    if (Number(network.chainId) !== SKALE_CHAIN.chainId) {
-      await switchOrAddChain(eip1193);
-    }
-
-    const signer = await provider.getSigner();
-    const address = await signer.getAddress();
+  private static async fromWalletSession(
+    provider: BrowserProvider,
+    signer: JsonRpcSigner,
+    address: string,
+  ): Promise<PlotClient> {
     const plotsC = new Contract(CONTRACTS.plots, PLOTS_ABI, signer);
     const repairsC = new Contract(CONTRACTS.repairs, REPAIRS_ABI, signer);
     const marketC = new Contract(CONTRACTS.marketplace, MARKETPLACE_ABI, signer);

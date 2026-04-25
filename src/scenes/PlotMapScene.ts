@@ -176,6 +176,7 @@ export class PlotMapScene extends Phaser.Scene {
     // Subscribe to the territory index immediately — reads don't need a
     // wallet. Wallet connect is a separate explicit step for writes.
     void this.connectTerritoryStream();
+    void this.reconnectWallet();
   }
 
   /** Called every frame by Phaser. Cheap invariants + viewport culling. */
@@ -680,6 +681,21 @@ export class PlotMapScene extends Phaser.Scene {
 
   // ---------------------------------------------------------------- wallet
 
+  private async reconnectWallet() {
+    if (!this.walletText || this.client) return;
+    try {
+      const client = await PlotClient.reconnect();
+      if (!client) return;
+      this.client = client;
+      this.walletText.setText(`Wallet: ${short(this.client.address)} · …`).setColor('#6eff9c');
+      await this.refreshWalletReadout();
+      this.restyleVisibleTilesForWallet();
+    } catch (err) {
+      console.warn('[wallet] silent reconnect failed', err);
+      this.walletText.setText('Wallet: not connected').setColor('#8a92a4');
+    }
+  }
+
   private async connectWallet() {
     if (!this.statusText || !this.walletText) return;
     this.walletText.setText('Wallet: connecting…').setColor('#f4a62a');
@@ -689,23 +705,29 @@ export class PlotMapScene extends Phaser.Scene {
       // reads — so the user sees the connection succeeded even if the RPC is
       // slow to return balance/repair info.
       this.walletText.setText(`Wallet: ${short(this.client.address)} · …`).setColor('#6eff9c');
-
-      const [nativeWei, repairBal] = await Promise.all([
-        this.client.nativeBalance().catch(() => 0n),
-        this.client.repairBalance().catch(() => 0),
-      ]);
-      this.repairText?.setText(`Repair Items · ${repairBal}`);
-      this.applyWalletReadout(nativeWei);
-
-      // Force a re-render so "mine" highlighting applies to visible tiles.
-      for (const [key, tile] of this.rendered) {
-        const entry = this.index.get(key);
-        if (entry) this.restyleTile(tile, entry);
-      }
+      await this.refreshWalletReadout();
+      this.restyleVisibleTilesForWallet();
     } catch (err) {
       console.error('[wallet] connect failed', err);
       this.walletText.setText('Wallet: not connected').setColor('#8a92a4');
       this.showError(`Connect failed — ${friendlyTxError(err)}`);
+    }
+  }
+
+  private async refreshWalletReadout() {
+    if (!this.client) return;
+    const [nativeWei, repairBal] = await Promise.all([
+      this.client.nativeBalance().catch(() => 0n),
+      this.client.repairBalance().catch(() => 0),
+    ]);
+    this.repairText?.setText(`Repair Items · ${repairBal}`);
+    this.applyWalletReadout(nativeWei);
+  }
+
+  private restyleVisibleTilesForWallet() {
+    for (const [key, tile] of this.rendered) {
+      const entry = this.index.get(key);
+      if (entry) this.restyleTile(tile, entry);
     }
   }
 
