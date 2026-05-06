@@ -3,24 +3,15 @@ import { addText } from '../ui/text';
 import { audio } from '../audio/manager';
 import { createRoom, joinRoom, isValidRoomCode, type RoomClient } from '../net/room';
 import { DEFAULT_RULES, type MatchConfig } from '../state/gameState';
-import { ChainClient, deriveMatchId, encryptBoard, SKALE_CHAIN, CONTRACTS, friendlyTxError } from '../chain';
+import { friendlyTxError } from '../chain';
 
 type Mode = 'menu' | 'create' | 'join' | 'connecting' | 'host-ready' | 'guest-waiting';
 
-interface Preset {
-  label: string;
-  width: number;
-  height: number;
-  coreDensity: number;
-}
-
-const PRESETS: Preset[] = [
-  { label: 'Small  8×8',   width: 8,  height: 8,  coreDensity: 0.14 },
-  { label: 'Medium 10×10', width: 10, height: 10, coreDensity: 0.15 },
-  { label: 'Large  14×12', width: 14, height: 12, coreDensity: 0.17 },
-];
-
 const TURN_OPTIONS = [0, 10, 20, 30];
+// Bounds for the board steppers. Match LobbyScene; normalizeMatchConfig
+// also caps width/height at 32 server-side as a safety net.
+const SIZE_MIN = 4;
+const SIZE_MAX = 20;
 
 export class OnlineLobbyScene extends Phaser.Scene {
   private mode: Mode = 'menu';
@@ -29,12 +20,10 @@ export class OnlineLobbyScene extends Phaser.Scene {
   private room: RoomClient | null = null;
   private keyHandler: ((ev: KeyboardEvent) => void) | null = null;
   // Host-side picks (only meaningful when this client is the host).
-  private presetIdx = 1;
+  private boardWidth = 10;
+  private boardHeight = 10;
+  private bombCount = 15;
   private turnSeconds = 0;
-  // Ranked = on-chain. Host's choice; guest inherits via match-config envelope.
-  private ranked = false;
-  // Cached wallet client so we only prompt to connect once per lobby session.
-  private chainClient: ChainClient | null = null;
   // Guarded so a late arriving event can't trigger a second transition.
   private transitioning = false;
 
@@ -158,47 +147,20 @@ export class OnlineLobbyScene extends Phaser.Scene {
 
   // Validates and starts the match. Called on both clients when the DO
   // echoes the host-sent config — the echo is what guarantees both players
-  // transition on the same signal. If the envelope carries chain info, the
-  // guest also needs to join the match on-chain before transitioning.
-  private async handleMatchConfig(raw: unknown) {
+  // transition on the same signal.
+  private handleMatchConfig(raw: unknown) {
     if (this.transitioning) return;
     if (!this.room) return;
-    const parsed = normalizeMatchConfig(raw);
-    if (!parsed) {
+    const config = normalizeMatchConfig(raw);
+    if (!config) {
       this.showError('Received invalid match config');
       return;
     }
 
     const mySeat = this.room.isHost ? 0 : 1;
-    let chainCtx: { client: ChainClient; matchId: string } | undefined;
-
-    if (parsed.chain) {
-      // Guest still needs to call joinMatch on-chain; host already created it
-      // and doesn't need to re-join. Skipping the re-prompt for host keeps the
-      // UX crisp (one wallet popup for createMatch + nothing else here).
-      if (this.room.isHost) {
-        if (!this.chainClient) {
-          this.showError('Internal: host missing chain client');
-          return;
-        }
-        chainCtx = { client: this.chainClient, matchId: parsed.chain.matchId };
-      } else {
-        this.renderMode('connecting');
-        try {
-          if (!this.chainClient) this.chainClient = await ChainClient.connect();
-          await this.chainClient.joinMatch(parsed.chain.matchId);
-          chainCtx = { client: this.chainClient, matchId: parsed.chain.matchId };
-        } catch (err) {
-          console.error('[online] joinMatch failed', err);
-          this.showError(`Failed to join on-chain match — ${friendlyTxError(err)}`);
-          return;
-        }
-      }
-    }
-
     this.transitioning = true;
-    const online = { room: this.room, mySeat, chain: chainCtx };
-    this.scene.start('Match', { config: parsed.config, online });
+    const online = { room: this.room, mySeat };
+    this.scene.start('Match', { config, online });
   }
 
   private renderCreate(cx: number, height: number) {
@@ -333,105 +295,143 @@ export class OnlineLobbyScene extends Phaser.Scene {
     });
   }
 
-  // Host sees this once the opponent connects. Compact pickers for board
-  // size + turn timer. Rules are defaulted for MVP — can be expanded later.
+  // Host sees this once the opponent connects. Adjustable board size +
+  // bombs + turn timer; rules are defaulted (MVP). Casual-only — ranked
+  // (on-chain) was removed from the online flow, so this is purely a
+  // DO-mediated match.
   private renderHostReady(cx: number, height: number) {
-    addText(this, cx, height * 0.28, 'Opponent connected', {
+    addText(this, cx, height * 0.22, 'Opponent connected', {
       fontSize: '14px',
       color: '#7cf0a0',
       fontStyle: 'bold',
     }).setOrigin(0.5);
 
-    // Board row
-    const boardLabel = addText(this, cx, height * 0.36, 'Board', {
+    // Board size (W + H steppers on one centred row).
+    const sizeLabel = addText(this, cx, height * 0.30, 'Board size', {
       fontSize: '14px',
       color: '#7c8497',
     }).setOrigin(0.5);
-    this.layer.add(boardLabel);
-    this.renderChipRow(cx, height * 0.36 + 26, PRESETS.map((p, i) => ({
-      label: p.label,
-      active: () => this.presetIdx === i,
-      onClick: () => { this.presetIdx = i; this.renderMode('host-ready'); },
+    this.layer.add(sizeLabel);
+    this.renderSizeSteppers(cx, height * 0.30 + 26);
+
+    // Bombs stepper.
+    const bombsLabel = addText(this, cx, height * 0.42, 'Bombs', {
+      fontSize: '14px',
+      color: '#7c8497',
+    }).setOrigin(0.5);
+    this.layer.add(bombsLabel);
+    const maxBombs = this.boardWidth * this.boardHeight - 1;
+    this.renderStepper(cx, height * 0.42 + 26, '', this.bombCount, 1, maxBombs, (v) => {
+      this.bombCount = v;
+      this.renderMode('host-ready');
+    });
+
+    // Turn timer row.
+    const timerLabel = addText(this, cx, height * 0.54, 'Turn timer', {
+      fontSize: '14px',
+      color: '#7c8497',
+    }).setOrigin(0.5);
+    this.layer.add(timerLabel);
+    this.renderChipRow(cx, height * 0.54 + 26, TURN_OPTIONS.map((t) => ({
+      label: t === 0 ? 'Off' : `${t}s`,
+      active: () => this.turnSeconds === t,
+      onClick: () => { this.turnSeconds = t; this.renderMode('host-ready'); },
     })));
 
-    // Turn timer row (disabled in ranked mode — the on-chain contract has no
-    // skipTurn function yet, so timer-driven skips can't be settled on-chain).
-    if (!this.ranked) {
-      const timerLabel = addText(this, cx, height * 0.48, 'Turn timer', {
-        fontSize: '14px',
-        color: '#7c8497',
-      }).setOrigin(0.5);
-      this.layer.add(timerLabel);
-      this.renderChipRow(cx, height * 0.48 + 26, TURN_OPTIONS.map((t) => ({
-        label: t === 0 ? 'Off' : `${t}s`,
-        active: () => this.turnSeconds === t,
-        onClick: () => { this.turnSeconds = t; this.renderMode('host-ready'); },
-      })));
-    }
-
-    // Ranked toggle — flips the match from DO-only to on-chain (SKALE + BITE).
-    const rankedLabel = addText(this, cx, height * 0.56, 'Mode', {
-      fontSize: '14px',
-      color: '#7c8497',
-    }).setOrigin(0.5);
-    this.layer.add(rankedLabel);
-    this.renderChipRow(cx, height * 0.56 + 26, [
-      {
-        label: 'Casual',
-        active: () => !this.ranked,
-        onClick: () => { this.ranked = false; this.turnSeconds = 0; this.renderMode('host-ready'); },
-      },
-      {
-        label: 'Ranked · on-chain',
-        active: () => this.ranked,
-        onClick: () => { this.ranked = true; this.turnSeconds = 0; this.renderMode('host-ready'); },
-      },
-    ]);
-
-    this.makeButton(cx, height * 0.72, 'Start Match', 0x2a6df4, 260, async () => {
-      const preset = PRESETS[this.presetIdx];
-      const coreCount = Math.max(1, Math.round(preset.width * preset.height * preset.coreDensity));
-      const seed = Math.floor(Math.random() * 0xffffffff);
+    this.makeButton(cx, height * 0.70, 'Start Match', 0x2a6df4, 260, () => {
+      // Re-clamp bombs against the current grid in case width/height shrank
+      // after the user last touched the bombs stepper.
+      const coreCount = clamp(this.bombCount, 1, this.boardWidth * this.boardHeight - 1);
       const config: MatchConfig = {
-        width: preset.width,
-        height: preset.height,
+        width: this.boardWidth,
+        height: this.boardHeight,
         coreCount,
         players: 2,
-        seed,
+        seed: Math.floor(Math.random() * 0xffffffff),
         rules: { ...DEFAULT_RULES },
         turnSeconds: this.turnSeconds,
       };
-
-      if (!this.ranked) {
-        // DO-only path: rely on the match-config echo so both clients land on
-        // MatchScene together.
-        this.room?.sendMatchConfig(config);
-        return;
-      }
-
-      // Ranked path: wallet + chain createMatch, THEN broadcast the envelope
-      // with chain.matchId so the guest can joinMatch on-chain. We deliberately
-      // zero out the seed in the broadcast config — the real seed stays host-
-      // local. Both clients use the public config as a placeholder board; the
-      // authoritative state comes from chain Revealed events.
-      const { width, height: scH } = this.scale;
-      this.flashToast(width / 2, scH * 0.80, 'Connecting wallet…', '#6eb4ff');
-      try {
-        if (!this.chainClient) this.chainClient = await ChainClient.connect();
-        this.flashToast(width / 2, scH * 0.80, 'Encrypting board…', '#6eb4ff');
-        const salt = crypto.randomUUID();
-        const matchId = deriveMatchId(this.room!.code, salt);
-        const { cipherCells } = await encryptBoard(SKALE_CHAIN.rpcUrl, CONTRACTS.match, config);
-        this.flashToast(width / 2, scH * 0.80, 'Posting match to chain…', '#6eb4ff');
-        await this.chainClient.createMatch(matchId, config.width, config.height, config.coreCount, cipherCells);
-
-        const publicConfig = { ...config, seed: 0, chain: { matchId } };
-        this.room?.sendMatchConfig(publicConfig);
-      } catch (err) {
-        console.error('[online] chain setup failed', err);
-        this.flashToast(width / 2, scH * 0.80, `Chain setup — ${friendlyTxError(err)}`, '#ff7a7a');
-      }
+      // DO echo lands on both clients → handleMatchConfig fires the
+      // transition simultaneously.
+      this.room?.sendMatchConfig(config);
     });
+  }
+
+  // Two steppers (W, H) rendered side-by-side, centred on cx. Bomb count
+  // is auto-clamped against the new grid area whenever either changes.
+  private renderSizeSteppers(cx: number, y: number) {
+    const stepperW = 32 + 6 + 70 + 6 + 32; // matches renderStepper layout
+    const gap = 16;
+    const totalW = stepperW * 2 + gap;
+    const leftX = cx - totalW / 2;
+    this.renderStepper(leftX + stepperW / 2, y, 'W', this.boardWidth, SIZE_MIN, SIZE_MAX, (v) => {
+      this.boardWidth = v;
+      this.bombCount = clamp(this.bombCount, 1, v * this.boardHeight - 1);
+      this.renderMode('host-ready');
+    });
+    const rightX = leftX + stepperW + gap + stepperW / 2;
+    this.renderStepper(rightX, y, 'H', this.boardHeight, SIZE_MIN, SIZE_MAX, (v) => {
+      this.boardHeight = v;
+      this.bombCount = clamp(this.bombCount, 1, this.boardWidth * v - 1);
+      this.renderMode('host-ready');
+    });
+  }
+
+  // [-] prefix value [+] stepper. Centred on (cx, y). Disabled buttons
+  // dim and don't fire onChange.
+  private renderStepper(
+    cx: number,
+    y: number,
+    prefix: string,
+    value: number,
+    min: number,
+    max: number,
+    onChange: (next: number) => void,
+  ) {
+    const btnW = 32;
+    const valueW = 70;
+    const h = 32;
+    const gap = 6;
+    const totalW = btnW + gap + valueW + gap + btnW;
+    const leftEdge = cx - totalW / 2;
+    const decX = leftEdge + btnW / 2;
+    const valueX = leftEdge + btnW + gap + valueW / 2;
+    const incX = leftEdge + btnW + gap + valueW + gap + btnW / 2;
+
+    this.renderStepperBtn(decX, y, btnW, h, '−', value > min, () => onChange(value - 1));
+    const bg = this.add.rectangle(valueX, y, valueW, h, 0x12151f).setStrokeStyle(1, 0x2a3a5a);
+    const text = addText(this, valueX, y, prefix ? `${prefix} ${value}` : `${value}`, {
+      fontSize: '15px',
+      color: '#e8ecf1',
+    }).setOrigin(0.5);
+    this.layer.add(bg);
+    this.layer.add(text);
+    this.renderStepperBtn(incX, y, btnW, h, '+', value < max, () => onChange(value + 1));
+  }
+
+  private renderStepperBtn(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    enabled: boolean,
+    onClick: () => void,
+  ) {
+    const bg = this.add.rectangle(x, y, w, h, enabled ? 0x2a6df4 : 0x14171e)
+      .setStrokeStyle(1, enabled ? 0x4f8bff : 0x2a2e38);
+    const text = addText(this, x, y, label, {
+      fontSize: '18px',
+      color: enabled ? '#ffffff' : '#4a5063',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+    this.layer.add(bg);
+    this.layer.add(text);
+    if (!enabled) return;
+    bg.setInteractive({ useHandCursor: true });
+    bg.on('pointerover', () => bg.setFillStyle(0x3b7bff));
+    bg.on('pointerout', () => bg.setFillStyle(0x2a6df4));
+    bg.on('pointerdown', onClick);
   }
 
   private renderGuestWaiting(cx: number, height: number) {
@@ -533,16 +533,9 @@ export class OnlineLobbyScene extends Phaser.Scene {
   }
 }
 
-interface ParsedMatchConfig {
-  config: MatchConfig;
-  chain?: { matchId: string };
-}
-
 // Defensive validation — the config crosses the wire as `unknown` and we
-// don't trust the shape. Coerce into a clean MatchConfig + optional chain
-// info, or return null. The chain info, when present, flips the match into
-// on-chain/Ranked mode downstream.
-function normalizeMatchConfig(raw: unknown): ParsedMatchConfig | null {
+// don't trust the shape. Coerce into a clean MatchConfig or return null.
+function normalizeMatchConfig(raw: unknown): MatchConfig | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -566,17 +559,9 @@ function normalizeMatchConfig(raw: unknown): ParsedMatchConfig | null {
     limitedBombThreshold: typeof rulesIn.limitedBombThreshold === 'number' ? rulesIn.limitedBombThreshold : DEFAULT_RULES.limitedBombThreshold,
   };
 
-  let chain: ParsedMatchConfig['chain'];
-  const rawChain = r.chain;
-  if (rawChain && typeof rawChain === 'object') {
-    const mid = (rawChain as { matchId?: unknown }).matchId;
-    if (typeof mid === 'string' && /^0x[a-fA-F0-9]{64}$/.test(mid)) {
-      chain = { matchId: mid };
-    }
-  }
+  return { width, height, coreCount, players, seed, rules, turnSeconds };
+}
 
-  return {
-    config: { width, height, coreCount, players, seed, rules, turnSeconds },
-    chain,
-  };
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }

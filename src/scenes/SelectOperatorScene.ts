@@ -72,6 +72,25 @@ export class SelectOperatorScene extends Phaser.Scene {
       fontSize: '12px',
       color: '#4a5063',
     }).setOrigin(0.5);
+
+    this.buildBackButton(24, 24);
+  }
+
+  private buildBackButton(x: number, y: number) {
+    const label = addText(this, x, y, '← BACK', {
+      fontSize: '14px',
+      color: '#aab0bf',
+      fontStyle: 'bold',
+    }).setOrigin(0, 0);
+    label.setInteractive({ useHandCursor: true });
+    label.on('pointerover', () => label.setColor('#e8ecf1'));
+    label.on('pointerout',  () => label.setColor('#aab0bf'));
+    // Same canActAt guard as the cards — prevents a stale release from
+    // MenuScene's button from instantly bouncing the player back.
+    label.on('pointerdown', () => {
+      if (this.time.now < this.canActAt) return;
+      this.scene.start('Menu');
+    });
   }
 
   private buildCard(x: number, y: number, w: number, h: number, opt: Option) {

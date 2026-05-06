@@ -3,23 +3,17 @@ import { DEFAULT_RULES, type MatchConfig, type Rules } from '../state/gameState'
 import { addText } from '../ui/text';
 import { audio } from '../audio/manager';
 
-interface Preset {
-  label: string;
-  width: number;
-  height: number;
-  coreDensity: number;
-}
-
-const PRESETS: Preset[] = [
-  { label: 'Small  8×8',   width: 8,  height: 8,  coreDensity: 0.14 },
-  { label: 'Medium 10×10', width: 10, height: 10, coreDensity: 0.15 },
-  { label: 'Large  14×12', width: 14, height: 12, coreDensity: 0.17 },
-];
-
 const NARROW_BREAKPOINT = 720;
+// Bounds for the steppers. Width/height go up to 20 (still fits on a mobile
+// portrait screen with the in-match HUD); bombs is clamped against the
+// current grid area at change time so we never end up with bombs >= cells.
+const SIZE_MIN = 4;
+const SIZE_MAX = 20;
 
 export class LobbyScene extends Phaser.Scene {
-  private presetIdx = 1;
+  private boardWidth = 10;
+  private boardHeight = 10;
+  private bombCount = 15;
   private players = 2;
   private turnSeconds = 0;
   private rules: Rules = { ...DEFAULT_RULES };
@@ -46,7 +40,9 @@ export class LobbyScene extends Phaser.Scene {
       // Single-column stack.
       const colX = 20;
       let y = 96;
-      y = this.renderBoardRow(colX, y);
+      y = this.renderSizeRow(colX, y);
+      y += 8;
+      y = this.renderBombsRow(colX, y);
       y += 8;
       y = this.renderPlayersRow(colX, y);
       y += 8;
@@ -62,17 +58,20 @@ export class LobbyScene extends Phaser.Scene {
         () => this.rules.limitedBomb,
         (v) => { this.rules.limitedBomb = v; }, ruleChipW);
     } else {
-      // Two-column layout (desktop).
+      // Two-column layout (desktop). Left = sizing + match knobs; right =
+      // optional rule toggles.
       const leftX = cx - 240;
       const rightX = cx + 20;
-      let ly = 150;
-      ly = this.renderBoardRow(leftX, ly);
+      let ly = 130;
+      ly = this.renderSizeRow(leftX, ly);
+      ly += 10;
+      ly = this.renderBombsRow(leftX, ly);
       ly += 10;
       ly = this.renderPlayersRow(leftX, ly);
       ly += 10;
       ly = this.renderTimerRow(leftX, ly);
 
-      let ry = 150;
+      let ry = 130;
       ry = this.renderRuleToggle(rightX, ry, 'Gentleman',
         () => this.rules.gentleman,
         (v) => { this.rules.gentleman = v; }, 320);
@@ -107,18 +106,37 @@ export class LobbyScene extends Phaser.Scene {
     this.scene.restart();
   }
 
-  private renderBoardRow(x: number, y: number): number {
-    addText(this, x, y, 'Board', { fontSize: '14px', color: '#7c8497' });
-    const chipY = y + 26;
+  // Inline width + height steppers on a single row. Bombs gets its own row
+  // because it has a wider value (up to triple-digit) and needs its own
+  // label so non-obvious clamping behaviour is discoverable.
+  private renderSizeRow(x: number, y: number): number {
+    addText(this, x, y, 'Board size', { fontSize: '14px', color: '#7c8497' });
+    const stepperY = y + 26;
     let cx = x;
-    PRESETS.forEach((p, i) => {
-      const chip = this.makeChip(cx, chipY, p.label, () => this.presetIdx === i, () => {
-        this.presetIdx = i;
-        this.scene.restart();
-      });
-      cx += chip.width + 10;
+    const wStep = this.makeStepper(cx, stepperY, 'W', this.boardWidth, SIZE_MIN, SIZE_MAX, (v) => {
+      this.boardWidth = v;
+      // Keep bombs valid against the new area before redraw.
+      this.bombCount = clamp(this.bombCount, 1, v * this.boardHeight - 1);
+      this.scene.restart();
     });
-    return chipY + 32;
+    cx += wStep.width + 12;
+    const hStep = this.makeStepper(cx, stepperY, 'H', this.boardHeight, SIZE_MIN, SIZE_MAX, (v) => {
+      this.boardHeight = v;
+      this.bombCount = clamp(this.bombCount, 1, this.boardWidth * v - 1);
+      this.scene.restart();
+    });
+    return stepperY + Math.max(wStep.height, hStep.height) + 6;
+  }
+
+  private renderBombsRow(x: number, y: number): number {
+    const max = this.boardWidth * this.boardHeight - 1;
+    addText(this, x, y, 'Bombs', { fontSize: '14px', color: '#7c8497' });
+    const stepperY = y + 26;
+    const step = this.makeStepper(x, stepperY, '', this.bombCount, 1, max, (v) => {
+      this.bombCount = v;
+      this.scene.restart();
+    });
+    return stepperY + step.height + 6;
   }
 
   private renderPlayersRow(x: number, y: number): number {
@@ -157,6 +175,67 @@ export class LobbyScene extends Phaser.Scene {
       this.scene.restart();
     }, chipW);
     return y + chip.height + 10;
+  }
+
+  // [-]  prefix value  [+]  — three-button stepper. Disabled buttons render
+  // dimmed and don't fire the onChange callback. Returns the rendered size
+  // so callers can advance the layout cursor.
+  private makeStepper(
+    x: number,
+    y: number,
+    prefix: string,
+    value: number,
+    min: number,
+    max: number,
+    onChange: (next: number) => void,
+  ): { width: number; height: number } {
+    const btnW = 32;
+    const valueW = 70;
+    const h = 32;
+    const gap = 6;
+    const totalW = btnW + gap + valueW + gap + btnW;
+
+    const decX = x;
+    const valueX = x + btnW + gap;
+    const incX = valueX + valueW + gap;
+
+    const decEnabled = value > min;
+    const incEnabled = value < max;
+
+    this.makeStepperBtn(decX, y, btnW, h, '−', decEnabled, () => onChange(value - 1));
+    const valueLabel = prefix ? `${prefix} ${value}` : `${value}`;
+    this.add.rectangle(valueX, y, valueW, h, 0x12151f).setStrokeStyle(1, 0x2a3a5a).setOrigin(0, 0);
+    addText(this, valueX + valueW / 2, y + h / 2, valueLabel, {
+      fontSize: '15px',
+      color: '#e8ecf1',
+    }).setOrigin(0.5);
+    this.makeStepperBtn(incX, y, btnW, h, '+', incEnabled, () => onChange(value + 1));
+
+    return { width: totalW, height: h };
+  }
+
+  private makeStepperBtn(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    enabled: boolean,
+    onClick: () => void,
+  ) {
+    const bg = this.add.rectangle(x, y, w, h, enabled ? 0x2a6df4 : 0x14171e)
+      .setStrokeStyle(1, enabled ? 0x4f8bff : 0x2a2e38)
+      .setOrigin(0, 0);
+    addText(this, x + w / 2, y + h / 2, label, {
+      fontSize: '18px',
+      color: enabled ? '#ffffff' : '#4a5063',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+    if (!enabled) return;
+    bg.setInteractive({ useHandCursor: true });
+    bg.on('pointerover', () => bg.setFillStyle(0x3b7bff));
+    bg.on('pointerout', () => bg.setFillStyle(0x2a6df4));
+    bg.on('pointerdown', onClick);
   }
 
   private makeChip(
@@ -201,12 +280,12 @@ export class LobbyScene extends Phaser.Scene {
   }
 
   private startMatch() {
-    const preset = PRESETS[this.presetIdx];
-    const coreCount = Math.max(1, Math.round(preset.width * preset.height * preset.coreDensity));
     const config: MatchConfig = {
-      width: preset.width,
-      height: preset.height,
-      coreCount,
+      width: this.boardWidth,
+      height: this.boardHeight,
+      // Re-clamp at start time too — guards against any race where a
+      // previously-valid bomb count outpaced a width/height shrink.
+      coreCount: clamp(this.bombCount, 1, this.boardWidth * this.boardHeight - 1),
       players: this.players,
       seed: Math.floor(Math.random() * 0xffffffff),
       rules: { ...this.rules },
@@ -214,4 +293,8 @@ export class LobbyScene extends Phaser.Scene {
     };
     this.scene.start('Match', { config });
   }
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
