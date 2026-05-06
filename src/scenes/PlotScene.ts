@@ -107,6 +107,19 @@ export class PlotScene extends Phaser.Scene {
 
     void this.hydrate();
     this.subscribe();
+
+    // SHUTDOWN fires on every scene transition (Back, scene.restart after a
+    // repair, or a parent navigating away). Without this, the chain-event
+    // unsubs in `leave()` only run on the explicit Back path and we'd leak
+    // listeners into the next scene's lifetime.
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.unsubRevealed?.();
+      this.unsubCleared?.();
+      this.unsubCorrupted?.();
+      this.unsubRevealed = undefined;
+      this.unsubCleared = undefined;
+      this.unsubCorrupted = undefined;
+    });
   }
 
   private async refreshRepairBalance() {
@@ -357,9 +370,7 @@ export class PlotScene extends Phaser.Scene {
   }
 
   private leave() {
-    this.unsubRevealed?.();
-    this.unsubCleared?.();
-    this.unsubCorrupted?.();
+    // Unsubs run in the SHUTDOWN handler — covers this path AND scene.restart.
     this.scene.start('PlotMap');
   }
 

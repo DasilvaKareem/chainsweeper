@@ -74,6 +74,11 @@ export class PlotMapScene extends Phaser.Scene {
   private uiCam?: Phaser.Cameras.Scene2D.Camera;
   private hudObjects: Phaser.GameObjects.GameObject[] = [];
 
+  // Set in the SHUTDOWN handler so any in-flight async work (balance fetch,
+  // territory connect, mint flow) can bail before touching destroyed Phaser
+  // objects or popping a `window.confirm` on a scene the user already left.
+  private isShuttingDown = false;
+
   // --- Map-space objects (main camera) ---
   private gridLayer?: Phaser.GameObjects.Graphics;
   private plotLayer?: Phaser.GameObjects.Container;
@@ -177,6 +182,21 @@ export class PlotMapScene extends Phaser.Scene {
     // wallet. Wallet connect is a separate explicit step for writes.
     void this.connectTerritoryStream();
     void this.reconnectWallet();
+
+    // Phaser fires SHUTDOWN on every scene transition (scene.start, restart,
+    // or stop) — not just our explicit Back button. Without this, navigating
+    // to PlotScene by clicking a tile would leave the territory WebSocket
+    // alive and let in-flight async (e.g. an awaited balance check) pop a
+    // mint confirm on the next scene the user landed on.
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.teardown());
+  }
+
+  private teardown() {
+    this.isShuttingDown = true;
+    this.territory?.close();
+    this.territory = undefined;
+    this.errorClearTimer?.remove();
+    this.errorClearTimer = undefined;
   }
 
   /** Called every frame by Phaser. Cheap invariants + viewport culling. */
@@ -608,11 +628,19 @@ export class PlotMapScene extends Phaser.Scene {
 
   private async connectTerritoryStream() {
     try {
-      this.territory = await connectTerritory();
+      const client = await connectTerritory();
+      // Scene was torn down while the WS was still handshaking — close the
+      // socket we just opened so it doesn't leak.
+      if (this.isShuttingDown) {
+        client.close();
+        return;
+      }
+      this.territory = client;
       this.statusText?.setText('Live — streaming plot updates from the index');
       this.liveBadge?.setText('LIVE — on').setColor('#6eff9c');
       this.territory.onEvent((ev) => this.onTerritoryEvent(ev));
     } catch (err) {
+      if (this.isShuttingDown) return;
       this.statusText?.setText(`Territory stream offline: ${errMsg(err)}`);
       this.liveBadge?.setText('LIVE — off').setColor('#ff6b6b');
     }
@@ -786,6 +814,9 @@ export class PlotMapScene extends Phaser.Scene {
     // MetaMask silently rejects for underfunded wallets — we'd rather tell
     // the user directly + point at the faucet.
     const preBal = await this.client.nativeBalance().catch(() => 0n);
+    // If the user navigated away while the balance was in flight, don't pop
+    // a mint confirm on whatever scene they landed on next.
+    if (this.isShuttingDown) return;
     if (preBal < this.client.plotPriceWei) {
       this.showError(
         `Not enough ${SKALE_CHAIN.nativeSymbol}. ` +
@@ -800,7 +831,7 @@ export class PlotMapScene extends Phaser.Scene {
       `Mint plot at (${plotX}, ${plotY})?\n` +
       `Price: ${formatEthShort(this.client.plotPriceWei)} ${SKALE_CHAIN.nativeSymbol}`,
     );
-    if (!confirmed) return;
+    if (!confirmed || this.isShuttingDown) return;
 
     const salt = Math.floor(Math.random() * 2 ** 30);
     this.clearError();
@@ -858,8 +889,8 @@ export class PlotMapScene extends Phaser.Scene {
   }
 
   private leave() {
-    this.territory?.close();
-    this.territory = undefined;
+    // Cleanup runs in teardown() via the SHUTDOWN event — covers this path
+    // AND scene.start('Plot', ...) when a user clicks a tile to drill in.
     this.scene.start('MultiplayerHub');
   }
 

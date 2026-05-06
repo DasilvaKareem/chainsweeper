@@ -9,9 +9,13 @@
 // client side keeps Phaser happy.
 //
 // Consistency model: DO is an eventually-consistent CACHE. Authoritative
-// state still lives on-chain. The DO heals drift via periodic full re-scans
-// (`FULL_RESCAN_INTERVAL_MS`) so missed events, reorgs, and cold starts
-// converge back to chain truth.
+// state still lives on-chain. The DO persists `plots` + `lastBlock` to its
+// own storage so cold starts resume from the last persisted block instead
+// of replaying from FROM_BLOCK. A bounded recent-window rescan (every
+// `RESCAN_INTERVAL_MS`, looking back `RESCAN_WINDOW_BLOCKS`) re-applies
+// recent events to heal RPC flakiness or short reorgs without ever going
+// back to genesis — that pattern blew Cloudflare's per-invocation
+// subrequest budget once the chain grew past the contract deploy block.
 
 interface Env {
   TERRITORY: DurableObjectNamespace;
@@ -19,11 +23,10 @@ interface Env {
   PLOTS_ADDRESS: string;
   MARKETPLACE_ADDRESS: string;
   /**
-   * Block at which the Plots contract was deployed. Starting from 0 on a
-   * long-running public chain (~1.6M blocks on SKALE Base Sepolia at deploy
-   * time) means thousands of sequential eth_getLogs calls before the DO can
-   * answer a websocket upgrade — blowing the Worker CPU budget. Set this to
-   * the deploy block (or a recent block) to keep cold starts fast.
+   * Floor block for the very first scan when the DO has no persisted
+   * lastBlock. Set to the Plots contract's deploy block. After the first
+   * complete catch-up, persisted `lastBlock` takes over and FROM_BLOCK
+   * only matters again if storage is wiped.
    */
   FROM_BLOCK: string;
 }
@@ -47,10 +50,20 @@ const TOPIC = {
 // Poll cadence for incremental scans; alarm wakes the DO. Low enough that
 // map updates feel live, high enough that RPC costs stay reasonable.
 const POLL_INTERVAL_MS = 10_000;
-// Full re-scan from genesis every 10 minutes to heal any missed events.
-const FULL_RESCAN_INTERVAL_MS = 10 * 60 * 1000;
-// Max blocks per eth_getLogs call. SKALE has a default cap; pick conservatively.
-const SCAN_CHUNK = 1000;
+// Periodically re-apply events from a recent window to heal RPC flakiness /
+// reorgs. Bounded — never goes back to genesis (that pattern blew the
+// Worker subrequest budget once the chain grew past the initial deploy).
+const RESCAN_INTERVAL_MS = 10 * 60 * 1000;
+const RESCAN_WINDOW_BLOCKS = 5_000;
+// Max blocks per eth_getLogs call. SKALE rejects spans > 2000 with
+// `-32005 Block range limit exceeded`, so 2000 is the hard ceiling.
+const SCAN_CHUNK = 2_000;
+// Cap on chunks scanned per Worker invocation. Each chunk = 2 eth_getLogs
+// subrequests (plots + marketplace); Cloudflare's free-plan cap is 50 per
+// invocation. 15 chunks ≈ 30 subrequests, leaving headroom for
+// eth_blockNumber + occasional eth_getBlockByNumber lookups. If the catch-up
+// gap exceeds this, we save progress and let the next alarm continue.
+const MAX_CHUNKS_PER_INVOCATION = 15;
 
 interface PlotCellEntry {
   x: number;
@@ -88,14 +101,20 @@ export class TerritoryIndex {
   private byToken = new Map<string, string>(); // tokenId hex → coord key
 
   // Block scan state. lastBlock tracks where incremental polling resumes;
-  // initFromBlock remembers the anchor used on cold start so full-rescans
-  // don't drift back to block 0.
+  // it's persisted in DO storage so cold starts don't replay from
+  // FROM_BLOCK every time the DO is evicted.
   private lastBlock = 0;
-  private initFromBlock = 0;
   private lastFullRescanAt = 0;
   private scanning = false;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  // Set whenever an event handler mutates `plots`. Persistence is gated on
+  // this so idle ticks (head moved, no events) don't rewrite the full
+  // index every poll.
+  private plotsDirty = false;
+  // Storage keys.
+  private static readonly KEY_LAST_BLOCK = 'lastBlock';
+  private static readonly KEY_PLOTS = 'plots';
 
   constructor(state: DurableObjectState, env: Env) {
     this.doState = state;
@@ -106,6 +125,9 @@ export class TerritoryIndex {
     if (req.headers.get('Upgrade') !== 'websocket') {
       return new Response('Expected WebSocket', { status: 426 });
     }
+    // ensureInitialized only loads persisted state — no RPC. The alarm
+    // does the actual scanning, so the upgrade always returns fast even
+    // if the DO is many thousands of blocks behind.
     await this.ensureInitialized();
 
     const pair = new WebSocketPair();
@@ -114,17 +136,17 @@ export class TerritoryIndex {
     this.doState.acceptWebSocket(server);
 
     // Send current snapshot immediately so the client can paint without a
-    // round-trip. Subsequent state arrives via broadcast from webSocketMessage
-    // or alarm-driven polling.
+    // round-trip. May be empty/stale on a brand-new DO; live updates arrive
+    // as the alarm-driven scan catches up.
     this.sendTo(server, {
       type: 'snapshot',
       plots: [...this.plots.values()],
       block: this.lastBlock,
     });
 
-    // Ensure the polling alarm is armed. setAlarm is idempotent; if one's
-    // already pending, this is a no-op.
-    await this.ensureAlarm();
+    // Kick the alarm so a connect on a cold DO triggers an immediate scan
+    // (otherwise the user waits up to POLL_INTERVAL_MS for the next tick).
+    await this.armAlarmImmediate();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -144,15 +166,21 @@ export class TerritoryIndex {
   webSocketError(_ws: WebSocket) { /* ditto */ }
 
   async alarm() {
+    // Re-init from storage if the DO was evicted between alarms.
+    await this.ensureInitialized();
+    let moreWorkPending = false;
     try {
-      await this.pollIncremental();
+      moreWorkPending = await this.pollIncremental();
     } catch (err) {
       console.error('[TerritoryIndex] poll failed', err);
     }
-    // Re-arm only if there are live clients. Idle DOs should hibernate.
-    if (this.doState.getWebSockets().length > 0) {
-      await this.ensureAlarm();
-    }
+    // Re-arm if there are live clients OR if we still have catch-up to do.
+    // The catch-up case matters on a brand-new DO: scanning the historical
+    // range takes many invocations (MAX_CHUNKS_PER_INVOCATION × SCAN_CHUNK
+    // per tick), and we want progress to continue even when no one's
+    // connected so the next user gets a complete snapshot.
+    const hasClients = this.doState.getWebSockets().length > 0;
+    if (hasClients || moreWorkPending) await this.ensureAlarm();
   }
 
   // ------------------------------------------------------------ init/poll
@@ -162,18 +190,24 @@ export class TerritoryIndex {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
       try {
-        // Cold start: scan from the configured FROM_BLOCK (set to the
-        // Plots-contract deploy block via wrangler.toml). Scanning from 0 on
-        // a 1.6M-block chain runs thousands of sequential eth_getLogs calls
-        // before we can answer the websocket upgrade, which blows the Worker
-        // CPU budget. The periodic full rescan (every 10m) uses the same
-        // anchor, so missed/reorg events still heal.
-        const fromBlock = parseFromBlock(this.env.FROM_BLOCK);
-        const head = await this.getBlockNumber();
-        this.initFromBlock = fromBlock;
-        await this.scanRange(fromBlock, head);
-        this.lastBlock = head;
-        this.lastFullRescanAt = Date.now();
+        // Load persisted state. No RPC here — the alarm handles scanning.
+        // Persisted plots survive DO eviction so cold starts skip the
+        // 100k-block historical replay that used to blow the subrequest cap.
+        const persistedLastBlock = await this.doState.storage.get<number>(
+          TerritoryIndex.KEY_LAST_BLOCK,
+        );
+        const persistedPlots = await this.doState.storage.get<PlotEntry[]>(
+          TerritoryIndex.KEY_PLOTS,
+        );
+
+        if (Array.isArray(persistedPlots)) {
+          for (const p of persistedPlots) {
+            const coord = `${p.x},${p.y}`;
+            this.plots.set(coord, p);
+            this.byToken.set(p.tokenId.toLowerCase(), coord);
+          }
+        }
+        this.lastBlock = persistedLastBlock ?? 0;
         this.initialized = true;
       } finally {
         this.initPromise = null;
@@ -182,59 +216,72 @@ export class TerritoryIndex {
     return this.initPromise;
   }
 
-  private async pollIncremental() {
-    if (this.scanning) return;
+  /** Returns true if more catch-up remains for the next alarm to handle. */
+  private async pollIncremental(): Promise<boolean> {
+    if (this.scanning) return false;
     this.scanning = true;
     try {
       const head = await this.getBlockNumber();
       const now = Date.now();
 
-      // Periodic full rescan heals any missed events (reorgs, RPC flakiness,
-      // topic hash drift after a contract upgrade). Cheaper in aggregate than
-      // chasing edge cases.
-      if (now - this.lastFullRescanAt >= FULL_RESCAN_INTERVAL_MS) {
-        await this.fullRescan(head);
-        this.lastFullRescanAt = now;
-        this.lastBlock = head;
-        return;
+      // Catch-up scan: from wherever we left off (persisted lastBlock) up
+      // to head, bounded by MAX_CHUNKS_PER_INVOCATION so we never blow the
+      // subrequest cap. If there's still gap left, the next alarm continues.
+      const fromBlock = this.lastBlock > 0
+        ? this.lastBlock + 1
+        : parseFromBlock(this.env.FROM_BLOCK);
+      let reachedHead = head;
+      if (head >= fromBlock) {
+        reachedHead = await this.scanRange(fromBlock, head);
+        this.lastBlock = reachedHead;
+        await this.persistLastBlock();
       }
 
-      if (head <= this.lastBlock) return;
-      await this.scanRange(this.lastBlock + 1, head);
-      this.lastBlock = head;
+      // Periodic recent-window rescan heals missed events (reorgs, RPC
+      // flakiness). Bounded — never goes back to FROM_BLOCK. Events are
+      // idempotent (set state by tokenId), so re-applying is safe.
+      // Only run when catch-up reached head; otherwise we'd rescan a
+      // window we haven't fully scanned yet.
+      const caughtUp = reachedHead >= head;
+      if (caughtUp && this.lastBlock > 0
+          && now - this.lastFullRescanAt >= RESCAN_INTERVAL_MS) {
+        const rescanFrom = Math.max(
+          parseFromBlock(this.env.FROM_BLOCK),
+          this.lastBlock - RESCAN_WINDOW_BLOCKS,
+        );
+        await this.scanRange(rescanFrom, this.lastBlock);
+        this.lastFullRescanAt = now;
+      }
+
+      // Persist plots only when an event handler actually changed the
+      // index. Avoids rewriting ~2MB on every idle tick.
+      if (this.plotsDirty) {
+        await this.persistPlots();
+        this.plotsDirty = false;
+      }
+
+      return reachedHead < head;
     } finally {
       this.scanning = false;
     }
   }
 
-  private async fullRescan(head: number) {
-    // Rebuild into a fresh index so removed/corrected state drops out.
-    const fresh = new Map<string, PlotEntry>();
-    const freshByToken = new Map<string, string>();
-    const prevPlots = this.plots;
-    this.plots = fresh;
-    this.byToken = freshByToken;
-    try {
-      await this.scanRange(this.initFromBlock, head);
-    } catch (err) {
-      // Roll back on failure — a half-rebuilt index is worse than a stale one.
-      this.plots = prevPlots;
-      this.byToken = new Map([...prevPlots.entries()].map(([k, v]) => [v.tokenId, k]));
-      throw err;
-    }
-    // Diff against previous and broadcast removals for tokens that disappeared.
-    for (const [coord, prev] of prevPlots) {
-      if (!fresh.has(coord)) {
-        this.broadcast({ type: 'removed', tokenId: prev.tokenId });
-      }
-    }
-  }
-
-  // Scan [fromBlock, toBlock] inclusive in chunks. Events are applied in
-  // block/log order; ordering matters for correctness (e.g. a Listed event
-  // must not overwrite a later Bought event).
-  private async scanRange(fromBlock: number, toBlock: number) {
+  /**
+   * Scan [fromBlock, toBlock] inclusive in chunks of SCAN_CHUNK blocks,
+   * stopping after MAX_CHUNKS_PER_INVOCATION chunks to stay under
+   * Cloudflare's per-invocation subrequest cap. Returns the last block
+   * actually scanned (caller persists it as lastBlock); the next alarm
+   * picks up from there.
+   *
+   * Events within a chunk are applied in (blockNumber, logIndex) order —
+   * ordering matters for correctness (e.g. a Listed event must not
+   * overwrite a later Bought event).
+   */
+  private async scanRange(fromBlock: number, toBlock: number): Promise<number> {
+    let chunks = 0;
+    let lastEnd = fromBlock - 1;
     for (let start = fromBlock; start <= toBlock; start += SCAN_CHUNK) {
+      if (chunks >= MAX_CHUNKS_PER_INVOCATION) break;
       const end = Math.min(start + SCAN_CHUNK - 1, toBlock);
       const plotsAddr = this.env.PLOTS_ADDRESS;
       const mktAddr = this.env.MARKETPLACE_ADDRESS;
@@ -244,7 +291,6 @@ export class TerritoryIndex {
         mktAddr ? this.getLogs(mktAddr, Object.values(TOPIC_MARKET), start, end) : Promise.resolve([]),
       ]);
 
-      // Merge-sort by (blockNumber, logIndex).
       const merged = [...plotLogs, ...mktLogs].sort((a, b) => {
         const ba = parseInt(a.blockNumber, 16);
         const bb = parseInt(b.blockNumber, 16);
@@ -252,7 +298,25 @@ export class TerritoryIndex {
         return parseInt(a.logIndex, 16) - parseInt(b.logIndex, 16);
       });
       for (const log of merged) await this.applyLog(log);
+
+      lastEnd = end;
+      chunks++;
     }
+    return lastEnd;
+  }
+
+  private async persistLastBlock() {
+    await this.doState.storage.put(TerritoryIndex.KEY_LAST_BLOCK, this.lastBlock);
+  }
+
+  private async persistPlots() {
+    // Stored as a flat array — much cheaper to deserialize than a Map and
+    // small enough at expected scale (10k plots × ~200B = 2MB) to fit
+    // comfortably in DO storage.
+    await this.doState.storage.put(
+      TerritoryIndex.KEY_PLOTS,
+      [...this.plots.values()],
+    );
   }
 
   private async applyLog(log: RawLog) {
@@ -460,6 +524,7 @@ export class TerritoryIndex {
 
   // ------------------------------------------------------------- WebSocket
 
+  /** Arm the alarm POLL_INTERVAL_MS from now. Idempotent. */
   private async ensureAlarm() {
     const now = Date.now();
     const pending = await this.doState.storage.getAlarm();
@@ -467,11 +532,26 @@ export class TerritoryIndex {
     await this.doState.storage.setAlarm(now + POLL_INTERVAL_MS);
   }
 
+  /**
+   * Arm the alarm to fire ASAP — used on a fresh WS connect so a cold DO
+   * doesn't make the user wait POLL_INTERVAL_MS before the first scan.
+   * Overrides any pending alarm that was further out.
+   */
+  private async armAlarmImmediate() {
+    const target = Date.now() + 1;
+    const pending = await this.doState.storage.getAlarm();
+    if (pending && pending <= target) return;
+    await this.doState.storage.setAlarm(target);
+  }
+
   private sendTo(ws: WebSocket, msg: Outbound) {
     try { ws.send(JSON.stringify(msg)); } catch { /* socket is going away */ }
   }
 
   private broadcast(msg: Outbound) {
+    // Every mutation in this DO flows through broadcast(update|removed),
+    // so this is the single place that flips the persistence dirty bit.
+    if (msg.type === 'update' || msg.type === 'removed') this.plotsDirty = true;
     const data = JSON.stringify(msg);
     for (const ws of this.doState.getWebSockets()) {
       try { ws.send(data); } catch { /* ignore */ }
